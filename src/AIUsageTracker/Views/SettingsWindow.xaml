@@ -1,0 +1,427 @@
+<Window x:Class="AIUsageTracker.Views.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Configurações — AI Usage Tracker"
+        Width="560"
+        Height="640"
+        WindowStartupLocation="CenterScreen"
+        Background="#0F172A"
+        Foreground="#F8FAFC"
+        ResizeMode="CanMinimize">
+
+    <Window.Resources>
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="#E2E8F0" />
+            <Setter Property="Margin" Value="0,5,0,5" />
+            <Setter Property="FontSize" Value="12.5" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style TargetType="RadioButton">
+            <Setter Property="Foreground" Value="#E2E8F0" />
+            <Setter Property="Margin" Value="0,5,0,5" />
+            <Setter Property="FontSize" Value="12.5" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#1E293B" />
+            <Setter Property="Foreground" Value="#F8FAFC" />
+            <Setter Property="BorderBrush" Value="#475569" />
+            <Setter Property="Padding" Value="6,4" />
+            <Setter Property="FontSize" Value="12" />
+        </Style>
+
+        <Style x:Key="SectionCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="#1E293B" />
+            <Setter Property="BorderBrush" Value="#334155" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="14,12" />
+            <Setter Property="Margin" Value="0,0,0,12" />
+        </Style>
+
+        <Style x:Key="PrimaryBtnStyle" TargetType="Button">
+            <Setter Property="Padding" Value="14,7" />
+            <Setter Property="Background" Value="#2563EB" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Padding="{TemplateBinding Padding}"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="6">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#3B82F6" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SecondaryBtnStyle" TargetType="Button">
+            <Setter Property="Padding" Value="12,7" />
+            <Setter Property="Background" Value="#1E293B" />
+            <Setter Property="Foreground" Value="#E2E8F0" />
+            <Setter Property="BorderBrush" Value="#475569" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Padding="{TemplateBinding Padding}"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#334155" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
+            <TextBlock FontSize="18"
+                       FontWeight="Bold"
+                       Foreground="#F8FAFC"
+                       Text="Configurações do AI Usage Tracker" />
+            <TextBlock FontSize="11.5"
+                       Foreground="#94A3B8"
+                       Text="Personalize a presença no Desktop, Barra de Tarefas, cores e indicadores de cada IA." />
+        </StackPanel>
+
+        <!-- Tabs -->
+        <TabControl Grid.Row="1"
+                    Background="#0F172A"
+                    BorderBrush="#334155"
+                    Foreground="#F8FAFC">
+
+            <!-- TAB 1: GERAL & JANELA -->
+            <TabItem Header="  Geral &amp; Janela  ">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="10">
+                    <StackPanel>
+                        <Border Style="{StaticResource SectionCardStyle}">
+                            <StackPanel>
+                                <TextBlock Margin="0,0,0,8"
+                                           FontSize="13.5"
+                                           FontWeight="Bold"
+                                           Foreground="#38BDF8"
+                                           Text="Presença Persistente no Windows" />
+                                <CheckBox Content="Exibir Widget Flutuante no Desktop (HUD)"
+                                          IsChecked="{Binding Draft.ShowDesktopWidget}" />
+                                <CheckBox Content="Manter Widget Sempre no Topo (Always on Top)"
+                                          IsChecked="{Binding Draft.AlwaysOnTop}" />
+                                <CheckBox Content="Modo Click-Through (Fantasma — cliques atravessam o Widget)"
+                                          IsChecked="{Binding Draft.ClickThrough}" />
+                                <CheckBox Content="Bloquear posição do Widget (impedir arrasto com o mouse)"
+                                          IsChecked="{Binding Draft.LockWidgetPosition}" />
+                                <CheckBox Content="Modo Compacto (ocultar subtítulos e encurtar textos)"
+                                          IsChecked="{Binding Draft.CompactMode}" />
+                                <CheckBox Content="Iniciar automaticamente junto com o Windows"
+                                          IsChecked="{Binding Draft.StartWithWindows}" />
+
+                                <Button Width="220"
+                                        Margin="0,8,0,0"
+                                        HorizontalAlignment="Left"
+                                        Style="{StaticResource SecondaryBtnStyle}"
+                                        Command="{Binding ResetPositionCommand}"
+                                        Content="Reposicionar Widget no Canto Padrão" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SectionCardStyle}">
+                            <StackPanel>
+                                <TextBlock Margin="0,0,0,8"
+                                           FontSize="13.5"
+                                           FontWeight="Bold"
+                                           Foreground="#38BDF8"
+                                           Text="Atualização Automática" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="90" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               VerticalAlignment="Center"
+                                               Foreground="#E2E8F0"
+                                               Text="Intervalo de atualização das cotas (segundos):" />
+                                    <TextBox Grid.Column="1"
+                                             Text="{Binding Draft.RefreshIntervalSeconds, UpdateSourceTrigger=PropertyChanged}" />
+                                </Grid>
+                                <TextBlock Margin="0,6,0,0"
+                                           FontSize="11"
+                                           Foreground="#94A3B8"
+                                           Text="Recomendado: 30 a 60 segundos. Mínimo: 10 segundos." />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- TAB 2: BARRAS & APARÊNCIA -->
+            <TabItem Header="  Barras &amp; Aparência  ">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="10">
+                    <StackPanel>
+                        <Border Style="{StaticResource SectionCardStyle}">
+                            <StackPanel>
+                                <TextBlock Margin="0,0,0,8"
+                                           FontSize="13.5"
+                                           FontWeight="Bold"
+                                           Foreground="#38BDF8"
+                                           Text="Modo das Barras de Indicadores" />
+                                <RadioButton GroupName="BarMode"
+                                             Content="Mostrar Cota Consumida (0% → 100% cheio conforme usa)"
+                                             IsChecked="{Binding ShowUsedMode}" />
+                                <RadioButton GroupName="BarMode"
+                                             Content="Mostrar Cota Restante (100% → 0% estilo bateria)"
+                                             IsChecked="{Binding ShowRemainingMode}" />
+
+                                <CheckBox Margin="0,8,0,4"
+                                          Content="Mostrar contagem regressiva até o reset (ex: ↻ 5d 22h)"
+                                          IsChecked="{Binding Draft.ShowResetCountdown}" />
+                                <CheckBox Content="Mostrar linha de subtítulo / detalhes de plano e sessão"
+                                          IsChecked="{Binding Draft.ShowSubtitles}" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SectionCardStyle}">
+                            <StackPanel>
+                                <TextBlock Margin="0,0,0,8"
+                                           FontSize="13.5"
+                                           FontWeight="Bold"
+                                           Foreground="#38BDF8"
+                                           Text="Dimensões e Transparência do Widget" />
+
+                                <DockPanel Margin="0,4">
+                                    <TextBlock Width="180"
+                                               Foreground="#E2E8F0"
+                                               Text="Opacidade do Fundo (%):" />
+                                    <TextBlock DockPanel.Dock="Right"
+                                               Width="45"
+                                               TextAlignment="Right"
+                                               Foreground="#38BDF8"
+                                               FontWeight="Bold"
+                                               Text="{Binding OpacityPercent, StringFormat={}{0:0}%}" />
+                                    <Slider Minimum="25"
+                                            Maximum="100"
+                                            TickFrequency="5"
+                                            IsSnapToTickEnabled="True"
+                                            Value="{Binding OpacityPercent}" />
+                                </DockPanel>
+
+                                <DockPanel Margin="0,8,0,4">
+                                    <TextBlock Width="180"
+                                               Foreground="#E2E8F0"
+                                               Text="Largura do Widget (px):" />
+                                    <TextBlock DockPanel.Dock="Right"
+                                               Width="45"
+                                               TextAlignment="Right"
+                                               Foreground="#38BDF8"
+                                               FontWeight="Bold"
+                                               Text="{Binding Draft.WidgetWidth, StringFormat={}{0:0}}" />
+                                    <Slider Minimum="270"
+                                            Maximum="520"
+                                            TickFrequency="10"
+                                            IsSnapToTickEnabled="True"
+                                            Value="{Binding Draft.WidgetWidth}" />
+                                </DockPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SectionCardStyle}">
+                            <StackPanel>
+                                <TextBlock Margin="0,0,0,8"
+                                           FontSize="13.5"
+                                           FontWeight="Bold"
+                                           Foreground="#38BDF8"
+                                           Text="Limiares de Alerta de Cores (% Consumida)" />
+
+                                <DockPanel Margin="0,4">
+                                    <TextBlock Width="200"
+                                               Foreground="#FBBF24"
+                                               Text="Alerta Amarelo a partir de (%):" />
+                                    <TextBlock DockPanel.Dock="Right"
+                                               Width="45"
+                                               TextAlignment="Right"
+                                               Foreground="#FBBF24"
+                                               FontWeight="Bold"
+                                               Text="{Binding Draft.WarningThresholdPercent, StringFormat={}{0:0}%}" />
+                                    <Slider Minimum="20"
+                                            Maximum="90"
+                                            TickFrequency="5"
+                                            IsSnapToTickEnabled="True"
+                                            Value="{Binding Draft.WarningThresholdPercent}" />
+                                </DockPanel>
+
+                                <DockPanel Margin="0,8,0,4">
+                                    <TextBlock Width="200"
+                                               Foreground="#F87171"
+                                               Text="Crítico Vermelho a partir de (%):" />
+                                    <TextBlock DockPanel.Dock="Right"
+                                               Width="45"
+                                               TextAlignment="Right"
+                                               Foreground="#F87171"
+                                               FontWeight="Bold"
+                                               Text="{Binding Draft.CriticalThresholdPercent, StringFormat={}{0:0}%}" />
+                                    <Slider Minimum="50"
+                                            Maximum="99"
+                                            TickFrequency="5"
+                                            IsSnapToTickEnabled="True"
+                                            Value="{Binding Draft.CriticalThresholdPercent}" />
+                                </DockPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- TAB 3: PROVEDORES & INDICADORES -->
+            <TabItem Header="  Provedores &amp; Modelos  ">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="10">
+                    <StackPanel>
+                        <!-- ChatGPT / Codex -->
+                        <Border Style="{StaticResource SectionCardStyle}">
+                            <StackPanel>
+                                <TextBlock Margin="0,0,0,6"
+                                           FontSize="13.5"
+                                           FontWeight="Bold"
+                                           Foreground="#10B981"
+                                           Text="ChatGPT / Codex (~/.codex)" />
+                                <CheckBox FontWeight="SemiBold"
+                                          Content="Habilitar monitoramento do ChatGPT / Codex"
+                                          IsChecked="{Binding Draft.EnableCodex}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Janela Principal de Limite (Semanal 7d / 5h)"
+                                          IsChecked="{Binding Draft.ShowCodexPrimary}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Janela Secundária (quando aplicável ao plano)"
+                                          IsChecked="{Binding Draft.ShowCodexSecondary}" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Claude Code -->
+                        <Border Style="{StaticResource SectionCardStyle}">
+                            <StackPanel>
+                                <TextBlock Margin="0,0,0,6"
+                                           FontSize="13.5"
+                                           FontWeight="Bold"
+                                           Foreground="#F97316"
+                                           Text="Claude Code CLI — Opus / Sonnet (~/.claude)" />
+                                <CheckBox FontWeight="SemiBold"
+                                          Content="Habilitar monitoramento do Claude Code"
+                                          IsChecked="{Binding Draft.EnableClaudeCode}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Cota de Sessão (Janela de 5 horas)"
+                                          IsChecked="{Binding Draft.ShowClaudeSession5h}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Cota Semanal Geral (Janela de 7 dias)"
+                                          IsChecked="{Binding Draft.ShowClaudeWeekly7d}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Cota Semanal Dedicada Claude Opus"
+                                          IsChecked="{Binding Draft.ShowClaudeOpus}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Cota Semanal Dedicada Claude Sonnet"
+                                          IsChecked="{Binding Draft.ShowClaudeSonnet}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Forçar exibição das barras Opus/Sonnet mesmo quando unificadas na conta"
+                                          IsChecked="{Binding Draft.ShowClaudeDedicatedEvenIfEmpty}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar custo estimado USD e modelo da sessão no subtítulo"
+                                          IsChecked="{Binding Draft.ShowClaudeSessionCostSubtitle}" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Gemini / Antigravity -->
+                        <Border Style="{StaticResource SectionCardStyle}">
+                            <StackPanel>
+                                <TextBlock Margin="0,0,0,6"
+                                           FontSize="13.5"
+                                           FontWeight="Bold"
+                                           Foreground="#60A5FA"
+                                           Text="Gemini / Antigravity IDE (Servidor Local)" />
+                                <CheckBox FontWeight="SemiBold"
+                                          Content="Habilitar monitoramento do Gemini / Antigravity"
+                                          IsChecked="{Binding Draft.EnableAntigravity}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Agrupar níveis de esforço (Low / Medium / High) em uma barra por modelo"
+                                          IsChecked="{Binding Draft.GroupAntigravityEffortLevels}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Gemini 4 Argon"
+                                          IsChecked="{Binding Draft.ShowAntigravityArgon}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Gemini 3.8 Flash"
+                                          IsChecked="{Binding Draft.ShowAntigravityFlash}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Claude Opus 5.5 (Cota do Antigravity)"
+                                          IsChecked="{Binding Draft.ShowAntigravityClaudeOpus}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Claude Sonnet 5.5 (Cota do Antigravity)"
+                                          IsChecked="{Binding Draft.ShowAntigravityClaudeSonnet}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar GPT-OSS 120B (Cota do Antigravity)"
+                                          IsChecked="{Binding Draft.ShowAntigravityGptOss}" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+
+        <!-- Footer Buttons -->
+        <Grid Grid.Row="2" Margin="0,14,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Button Grid.Column="0"
+                    Style="{StaticResource SecondaryBtnStyle}"
+                    Command="{Binding RestoreDefaultsCommand}"
+                    Content="Restaurar Padrões" />
+
+            <Button Grid.Column="2"
+                    Margin="0,0,8,0"
+                    Style="{StaticResource SecondaryBtnStyle}"
+                    Command="{Binding CancelCommand}"
+                    Content="Cancelar" />
+
+            <Button Grid.Column="3"
+                    Margin="0,0,8,0"
+                    Style="{StaticResource SecondaryBtnStyle}"
+                    Command="{Binding ApplyCommand}"
+                    Content="Aplicar" />
+
+            <Button Grid.Column="4"
+                    Style="{StaticResource PrimaryBtnStyle}"
+                    Command="{Binding SaveCommand}"
+                    Content="Salvar e Fechar" />
+        </Grid>
+    </Grid>
+</Window>
