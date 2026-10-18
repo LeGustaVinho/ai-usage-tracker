@@ -28,6 +28,11 @@ public sealed class AppSettings
     public double CriticalThresholdPercent { get; set; } = 85.0;
     public int RefreshIntervalSeconds { get; set; } = 60;
 
+    // Notificações e Sons
+    public bool EnableResetNotifications { get; set; } = true;
+    public bool PlaySoundOnNotification { get; set; } = true;
+    public double MinQuotaIncreaseToNotifyPercent { get; set; } = 5.0;
+
     // ChatGPT / Codex
     public bool EnableCodex { get; set; } = true;
     public bool ShowCodexPrimary { get; set; } = true;
@@ -42,6 +47,7 @@ public sealed class AppSettings
     public bool ShowClaudeSonnet { get; set; } = true;
     public bool ShowClaudeDedicatedEvenIfEmpty { get; set; } = false;
     public bool ShowClaudeSessionCostSubtitle { get; set; } = true;
+    public bool AutoPromptClaudeLoginOnExpiration { get; set; } = true;
     public string CustomClaudeCredentialsPath { get; set; } = string.Empty;
 
     // Gemini / Antigravity

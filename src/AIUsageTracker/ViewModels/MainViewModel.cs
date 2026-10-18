@@ -16,6 +16,7 @@ public sealed class MainViewModel : ObservableObject
     private readonly SettingsService _settingsService;
     private readonly QuotaPollingService _pollingService;
     private readonly Action _openSettingsAction;
+    private readonly ClaudeAuthService? _claudeAuthService;
 
     private bool _isRefreshing;
     private string _lastUpdatedText = "Carregando...";
@@ -56,6 +57,7 @@ public sealed class MainViewModel : ObservableObject
     public double WidgetWidth => _settingsService.Current.WidgetWidth;
     public bool ShowRemainingInsteadOfUsed => _settingsService.Current.ShowRemainingInsteadOfUsed;
     public string DisplayModeLabel => _settingsService.Current.ShowRemainingInsteadOfUsed ? "% RESTANTE" : "% USADA";
+    public bool IsClaudeTokenExpired => _claudeAuthService?.IsExpired ?? false;
 
     public ICommand RefreshCommand { get; }
     public ICommand ToggleDisplayModeCommand { get; }
@@ -63,17 +65,20 @@ public sealed class MainViewModel : ObservableObject
     public ICommand ToggleClickThroughCommand { get; }
     public ICommand ToggleAlwaysOnTopCommand { get; }
     public ICommand OpenSettingsCommand { get; }
+    public ICommand ReconnectClaudeCommand { get; }
 
     public event EventHandler? UiStateUpdated;
 
     public MainViewModel(
         SettingsService settingsService,
         QuotaPollingService pollingService,
-        Action openSettingsAction)
+        Action openSettingsAction,
+        ClaudeAuthService? claudeAuthService = null)
     {
         _settingsService = settingsService;
         _pollingService = pollingService;
         _openSettingsAction = openSettingsAction;
+        _claudeAuthService = claudeAuthService;
 
         RefreshCommand = new RelayCommand(() => _ = _pollingService.RefreshNowAsync());
         ToggleDisplayModeCommand = new RelayCommand(ToggleDisplayMode);
@@ -81,10 +86,32 @@ public sealed class MainViewModel : ObservableObject
         ToggleClickThroughCommand = new RelayCommand(ToggleClickThrough);
         ToggleAlwaysOnTopCommand = new RelayCommand(ToggleAlwaysOnTop);
         OpenSettingsCommand = new RelayCommand(() => _openSettingsAction());
+        ReconnectClaudeCommand = new RelayCommand(() =>
+        {
+            if (_claudeAuthService != null)
+            {
+                _claudeAuthService.TryAutoLogin(force: true);
+            }
+            else
+            {
+                ClaudeAuthService.LaunchInteractiveLogin();
+            }
+        });
 
         _pollingService.QuotasUpdated += OnQuotasUpdated;
         _pollingService.RefreshStateChanged += OnRefreshStateChanged;
         _settingsService.SettingsChanged += OnSettingsChanged;
+
+        if (_claudeAuthService != null)
+        {
+            _claudeAuthService.TokenExpiredStateChanged += (_, _) =>
+            {
+                Application.Current?.Dispatcher.InvokeAsync(() =>
+                {
+                    OnPropertyChanged(nameof(IsClaudeTokenExpired));
+                });
+            };
+        }
     }
 
     private void OnRefreshStateChanged(object? sender, bool refreshing)

@@ -58,18 +58,29 @@ public sealed class SettingsViewModel : ObservableObject
         }
     }
 
+    private readonly Action? _testNotificationAction;
+
+    public bool IsClaudeTokenExpired => ClaudeAuthService.IsTokenExpiredStatic(_settingsService.Current);
+    public string ClaudeTokenStatusText => IsClaudeTokenExpired ? "Token Expirado (Reautenticação necessária)" : "Token Ativo (Autenticado)";
+    public string ClaudeTokenStatusColorHex => IsClaudeTokenExpired ? "#EF4444" : "#10B981";
+
     public ICommand SaveCommand { get; }
     public ICommand ApplyCommand { get; }
     public ICommand ResetPositionCommand { get; }
     public ICommand RestoreDefaultsCommand { get; }
     public ICommand CancelCommand { get; }
+    public ICommand TestNotificationCommand { get; }
+    public ICommand ReconnectClaudeCommand { get; }
 
-    public SettingsViewModel(SettingsService settingsService, Action closeWindowAction)
+    public SettingsViewModel(SettingsService settingsService, Action closeWindowAction, Action? testNotificationAction = null)
     {
         _settingsService = settingsService;
         _closeWindowAction = closeWindowAction;
+        _testNotificationAction = testNotificationAction;
         _draft = _settingsService.Current.Clone();
 
+        TestNotificationCommand = new RelayCommand(() => _testNotificationAction?.Invoke());
+        ReconnectClaudeCommand = new RelayCommand(() => ClaudeAuthService.LaunchInteractiveLogin());
         ApplyCommand = new RelayCommand(Apply);
         SaveCommand = new RelayCommand(() =>
         {

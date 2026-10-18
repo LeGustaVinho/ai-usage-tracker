@@ -57,6 +57,7 @@ public sealed class TrayIconService : IDisposable
         _invertModeItem = new ToolStripMenuItem("Exibir % Restante (em vez de % Usada)", null, (_, _) => _viewModel.ToggleDisplayMode());
 
         var refreshItem = new ToolStripMenuItem("Atualizar Cotas Agora", null, (_, _) => _viewModel.RefreshCommand.Execute(null));
+        var reconnectClaudeItem = new ToolStripMenuItem("Reconectar Claude Code...", null, (_, _) => _viewModel.ReconnectClaudeCommand.Execute(null));
         var settingsItem = new ToolStripMenuItem("Configurações...", null, (_, _) => _openSettingsAction());
         var exitItem = new ToolStripMenuItem("Sair", null, (_, _) => _exitApplicationAction());
 
@@ -69,6 +70,7 @@ public sealed class TrayIconService : IDisposable
         _contextMenu.Items.Add(_invertModeItem);
         _contextMenu.Items.Add(new ToolStripSeparator());
         _contextMenu.Items.Add(refreshItem);
+        _contextMenu.Items.Add(reconnectClaudeItem);
         _contextMenu.Items.Add(settingsItem);
         _contextMenu.Items.Add(new ToolStripSeparator());
         _contextMenu.Items.Add(exitItem);
@@ -92,6 +94,15 @@ public sealed class TrayIconService : IDisposable
         {
             _toggleFlyoutAction();
         }
+    }
+
+    public void ShowBalloonNotification(string title, string message, bool playSound)
+    {
+        try
+        {
+            _notifyIcon.ShowBalloonTip(6000, title, message, ToolTipIcon.Info);
+        }
+        catch { }
     }
 
     private void SyncTrayVisuals()

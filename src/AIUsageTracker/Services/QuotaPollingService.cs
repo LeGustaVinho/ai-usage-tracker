@@ -12,6 +12,7 @@ namespace AIUsageTracker.Services;
 public sealed class QuotaPollingService : IDisposable
 {
     private readonly SettingsService _settingsService;
+    private readonly ClaudeAuthService? _claudeAuthService;
     private readonly IReadOnlyList<IQuotaProvider> _providers;
     private readonly DispatcherTimer _timer;
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
@@ -24,9 +25,10 @@ public sealed class QuotaPollingService : IDisposable
     public event EventHandler<IReadOnlyList<QuotaItem>>? QuotasUpdated;
     public event EventHandler<bool>? RefreshStateChanged;
 
-    public QuotaPollingService(SettingsService settingsService)
+    public QuotaPollingService(SettingsService settingsService, ClaudeAuthService? claudeAuthService = null)
     {
         _settingsService = settingsService;
+        _claudeAuthService = claudeAuthService;
         _lastProviderConfigSignature = ComputeProviderSignature(_settingsService.Current);
         _providers = new IQuotaProvider[]
         {
@@ -42,6 +44,11 @@ public sealed class QuotaPollingService : IDisposable
         _timer.Tick += async (_, _) => await RefreshNowAsync();
 
         _settingsService.SettingsChanged += OnSettingsChanged;
+
+        if (_claudeAuthService != null)
+        {
+            _claudeAuthService.CredentialsChanged += async (_, _) => await RefreshNowAsync();
+        }
     }
 
     public void Start()
@@ -86,6 +93,15 @@ public sealed class QuotaPollingService : IDisposable
             RefreshStateChanged?.Invoke(this, true);
 
             AppSettings snapshot = _settingsService.Current;
+
+            if (_claudeAuthService != null && snapshot.EnableClaudeCode)
+            {
+                bool isExpired = _claudeAuthService.UpdateTokenExpiredStatus();
+                if (isExpired && snapshot.AutoPromptClaudeLoginOnExpiration)
+                {
+                    _claudeAuthService.TryAutoLogin(force: false);
+                }
+            }
             Task<IReadOnlyList<QuotaItem>>[] tasks = _providers
                 .Select(p => p.FetchQuotasAsync(snapshot, cancellationToken))
                 .ToArray();

@@ -159,6 +159,44 @@
                                            FontSize="13.5"
                                            FontWeight="Bold"
                                            Foreground="#38BDF8"
+                                           Text="Notificações no Windows e Som" />
+                                <CheckBox Content="Notificar no Windows quando alguma cota resetar ou aumentar"
+                                          IsChecked="{Binding Draft.EnableResetNotifications}" />
+                                <CheckBox Content="Tocar som ao emitir notificação"
+                                          IsChecked="{Binding Draft.PlaySoundOnNotification}" />
+
+                                <DockPanel Margin="0,6,0,4">
+                                    <TextBlock Width="220"
+                                               Foreground="#E2E8F0"
+                                               Text="Aumento mínimo para alertar (%):" />
+                                    <TextBlock DockPanel.Dock="Right"
+                                               Width="45"
+                                               TextAlignment="Right"
+                                               Foreground="#38BDF8"
+                                               FontWeight="Bold"
+                                               Text="{Binding Draft.MinQuotaIncreaseToNotifyPercent, StringFormat={}{0:0}%}" />
+                                    <Slider Minimum="1"
+                                            Maximum="50"
+                                            TickFrequency="1"
+                                            IsSnapToTickEnabled="True"
+                                            Value="{Binding Draft.MinQuotaIncreaseToNotifyPercent}" />
+                                </DockPanel>
+
+                                <Button Width="220"
+                                        Margin="0,8,0,0"
+                                        HorizontalAlignment="Left"
+                                        Style="{StaticResource SecondaryBtnStyle}"
+                                        Command="{Binding TestNotificationCommand}"
+                                        Content="🔔 Testar Notificação e Som" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource SectionCardStyle}">
+                            <StackPanel>
+                                <TextBlock Margin="0,0,0,8"
+                                           FontSize="13.5"
+                                           FontWeight="Bold"
+                                           Foreground="#38BDF8"
                                            Text="Atualização Automática" />
                                 <Grid>
                                     <Grid.ColumnDefinitions>
@@ -352,6 +390,40 @@
                                 <CheckBox Margin="18,4,0,4"
                                           Content="Mostrar custo estimado USD e modelo da sessão no subtítulo"
                                           IsChecked="{Binding Draft.ShowClaudeSessionCostSubtitle}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Iniciar rotina de login automaticamente ao detectar token expirado"
+                                          IsChecked="{Binding Draft.AutoPromptClaudeLoginOnExpiration}" />
+
+                                <Border Margin="18,8,0,4"
+                                        Padding="10,8"
+                                        Background="#1E293B"
+                                        BorderBrush="#33475569"
+                                        BorderThickness="1"
+                                        CornerRadius="6">
+                                    <StackPanel>
+                                        <DockPanel LastChildFill="True">
+                                            <TextBlock Text="Status do Token:" Foreground="#94A3B8" FontSize="11" />
+                                            <TextBlock Margin="6,0,0,0"
+                                                       Text="{Binding ClaudeTokenStatusText}"
+                                                       Foreground="{Binding ClaudeTokenStatusColorHex}"
+                                                       FontWeight="SemiBold"
+                                                       FontSize="11" />
+                                        </DockPanel>
+                                        <TextBlock Margin="0,4,0,8"
+                                                   FontSize="10"
+                                                   Foreground="#64748B"
+                                                   Text="Quando o token expira, clique abaixo para abrir a janela de autorização do Claude Code no navegador." />
+                                        <Button HorizontalAlignment="Left"
+                                                Padding="12,5"
+                                                Background="#F97316"
+                                                Foreground="White"
+                                                FontWeight="Bold"
+                                                FontSize="11"
+                                                Cursor="Hand"
+                                                Command="{Binding ReconnectClaudeCommand}"
+                                                Content="🔑 Reconectar Claude Code (Login Interativo)" />
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
                         </Border>
 

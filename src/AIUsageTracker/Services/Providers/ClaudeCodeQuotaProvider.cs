@@ -20,8 +20,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         Timeout = TimeSpan.FromSeconds(7)
     };
 
-    // Minimum interval between live HTTP calls to Anthropic's oauth/usage endpoint to avoid HTTP 429
-    private static readonly TimeSpan MinApiPollInterval = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan MinApiPollInterval = TimeSpan.FromSeconds(45);
 
     private readonly string _cacheFilePath;
     private DateTimeOffset _nextAllowedApiCallUtc = DateTimeOffset.MinValue;
@@ -56,109 +55,357 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
             return Array.Empty<QuotaItem>();
         }
 
-        string? sessionCostSubtitle = settings.ShowClaudeSessionCostSubtitle
-            ? TryGetLatestLocalSessionSummary()
-            : null;
+        // 1. Inspect recent local session logs for session cost, active model, and rate limit events (resetsAt)
+        var sessionDetails = TryGetLatestSessionDetails();
 
-        try
-        {
-            string credPath = settings.GetEffectiveClaudeCredentialsPath();
-            if (!File.Exists(credPath))
-            {
-                return TryBuildFromCacheOrFallback(settings, sessionCostSubtitle, "Credenciais ~/.claude/.credentials.json não encontradas");
-            }
+        // 2. Inspect plan-usage-history.json written by Claude Desktop / Claude Code
+        var planHistory = TryGetLatestPlanUsageHistory();
 
-            // If we recently polled or are in a 429 cooldown window and have cached JSON, use cache without hitting 429
-            if (DateTimeOffset.UtcNow < _nextAllowedApiCallUtc && !string.IsNullOrWhiteSpace(_lastValidApiJson))
-            {
-                var cachedItems = ParseUsageJson(_lastValidApiJson, settings, sessionCostSubtitle, isCached: true);
-                if (cachedItems.Count > 0)
-                {
-                    return cachedItems;
-                }
-            }
+        // 3. Try live Anthropic OAuth API if credentials are valid and not expired
+        string? apiBody = null;
 
-            string credJson = await File.ReadAllTextAsync(credPath, cancellationToken);
-            using JsonDocument credDoc = JsonDocument.Parse(credJson);
-
-            if (!credDoc.RootElement.TryGetProperty("claudeAiOauth", out JsonElement oauthEl) ||
-                !oauthEl.TryGetProperty("accessToken", out JsonElement tokenEl))
-            {
-                return TryBuildFromCacheOrFallback(settings, sessionCostSubtitle, "Token claudeAiOauth ausente");
-            }
-
-            string? accessToken = tokenEl.GetString();
-            if (string.IsNullOrWhiteSpace(accessToken))
-            {
-                return TryBuildFromCacheOrFallback(settings, sessionCostSubtitle, "Token OAuth vazio");
-            }
-
-            using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.anthropic.com/api/oauth/usage");
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
-            request.Headers.TryAddWithoutValidation("anthropic-beta", "oauth-2025-04-20");
-            request.Headers.UserAgent.ParseAdd("claude-code/2.0.0");
-
-            using HttpResponseMessage response = await Http.SendAsync(request, cancellationToken);
-
-            if (response.StatusCode == HttpStatusCode.TooManyRequests)
-            {
-                // Respect Retry-After header if provided, otherwise back off for 4 minutes
-                TimeSpan backoff = TimeSpan.FromMinutes(4);
-                if (response.Headers.RetryAfter?.Delta is TimeSpan delta && delta > TimeSpan.Zero)
-                {
-                    backoff = delta;
-                }
-                _nextAllowedApiCallUtc = DateTimeOffset.UtcNow.Add(backoff);
-
-                return TryBuildFromCacheOrFallback(settings, sessionCostSubtitle, "API em cooldown (HTTP 429 Rate Limit)");
-            }
-
-            if (!response.IsSuccessStatusCode)
-            {
-                return TryBuildFromCacheOrFallback(settings, sessionCostSubtitle, $"API retornou HTTP {(int)response.StatusCode}");
-            }
-
-            string body = await response.Content.ReadAsStringAsync(cancellationToken);
-            var liveItems = ParseUsageJson(body, settings, sessionCostSubtitle, isCached: false);
-
-            if (liveItems.Count > 0)
-            {
-                _lastValidApiJson = body;
-                _nextAllowedApiCallUtc = DateTimeOffset.UtcNow.Add(MinApiPollInterval);
-                SaveCacheToDisk(body);
-                return liveItems;
-            }
-
-            return TryBuildFromCacheOrFallback(settings, sessionCostSubtitle, "Resposta da API sem janelas de cota");
-        }
-        catch (Exception ex)
-        {
-            return TryBuildFromCacheOrFallback(settings, sessionCostSubtitle, ex.Message);
-        }
-    }
-
-    private IReadOnlyList<QuotaItem> TryBuildFromCacheOrFallback(
-        AppSettings settings,
-        string? sessionCostSubtitle,
-        string fallbackReason)
-    {
-        if (!string.IsNullOrWhiteSpace(_lastValidApiJson))
+        if (ShouldAttemptApiCall(settings))
         {
             try
             {
-                var cached = ParseUsageJson(_lastValidApiJson, settings, sessionCostSubtitle, isCached: true);
-                if (cached.Count > 0)
+                // Proactively refresh token if expired or expiring within 5 minutes
+                if (ClaudeAuthService.IsTokenExpiringSoonStatic(settings, TimeSpan.FromMinutes(5)))
                 {
-                    return cached;
+                    await ClaudeAuthService.TrySilentTokenRefreshAsync(settings, cancellationToken);
+                }
+
+                var apiResult = await TryCallOAuthApiAsync(settings, cancellationToken);
+                if (apiResult.Success && !string.IsNullOrWhiteSpace(apiResult.Body))
+                {
+                    apiBody = apiResult.Body;
+                    _lastValidApiJson = apiBody;
+                    _nextAllowedApiCallUtc = DateTimeOffset.UtcNow.Add(MinApiPollInterval);
+                    SaveCacheToDisk(apiBody);
+                }
+                else if (apiResult.StatusCode == HttpStatusCode.Unauthorized)
+                {
+                    // Token expired: attempt silent refresh in background and retry!
+                    bool refreshed = await ClaudeAuthService.TrySilentTokenRefreshAsync(settings, cancellationToken);
+                    if (refreshed)
+                    {
+                        var retryResult = await TryCallOAuthApiAsync(settings, cancellationToken);
+                        if (retryResult.Success && !string.IsNullOrWhiteSpace(retryResult.Body))
+                        {
+                            apiBody = retryResult.Body;
+                            _lastValidApiJson = apiBody;
+                            _nextAllowedApiCallUtc = DateTimeOffset.UtcNow.Add(MinApiPollInterval);
+                            SaveCacheToDisk(apiBody);
+                        }
+                    }
+                }
+                else if (apiResult.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    _nextAllowedApiCallUtc = DateTimeOffset.UtcNow.Add(apiResult.RetryAfter ?? TimeSpan.FromMinutes(2));
                 }
             }
             catch
             {
-                // Ignore cache parse failure
+                // Network error, proceed to synthesize with local data
             }
         }
 
-        return CreateFallbackList(sessionCostSubtitle, fallbackReason);
+        bool isTokenExpired = ClaudeAuthService.IsTokenExpiredStatic(settings);
+
+        // 4. Synthesize the most accurate, real-time quota items (using apiBody or cached API)
+        var items = SynthesizeQuotas(settings, planHistory, sessionDetails, apiBody ?? _lastValidApiJson, isTokenExpired);
+        if (items.Count > 0)
+        {
+            return items;
+        }
+
+        // 5. Fallback if no sources found
+        string fallbackSubtitle = isTokenExpired
+            ? "Token expirado • Clique em Reconectar"
+            : (sessionDetails.Subtitle ?? "Nenhum dado recente encontrado");
+
+        return new[]
+        {
+            new QuotaItem
+            {
+                Id = "claude.session",
+                Provider = QuotaProviderType.ClaudeCode,
+                ProviderBadge = "CLAUDE",
+                BadgeColorHex = "#D97757",
+                Title = "Claude Code (5h)",
+                UsedPercent = 0,
+                IsAvailable = false,
+                Subtitle = fallbackSubtitle,
+                SourceDetail = isTokenExpired ? "Claude Code (Token expirado)" : "Claude Desktop / Code",
+                SortOrder = 20
+            }
+        };
+    }
+
+    private bool ShouldAttemptApiCall(AppSettings settings)
+    {
+        if (DateTimeOffset.UtcNow < _nextAllowedApiCallUtc)
+        {
+            return false;
+        }
+
+        string credPath = settings.GetEffectiveClaudeCredentialsPath();
+        if (!File.Exists(credPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            string credJson = File.ReadAllText(credPath);
+            using JsonDocument doc = JsonDocument.Parse(credJson);
+            if (doc.RootElement.TryGetProperty("claudeAiOauth", out JsonElement oauthEl))
+            {
+                bool hasAccessToken = oauthEl.TryGetProperty("accessToken", out JsonElement tEl) && !string.IsNullOrWhiteSpace(tEl.GetString());
+                bool hasRefreshToken = oauthEl.TryGetProperty("refreshToken", out JsonElement rEl) && !string.IsNullOrWhiteSpace(rEl.GetString());
+                return hasAccessToken || hasRefreshToken;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private static async Task<(bool Success, HttpStatusCode? StatusCode, TimeSpan? RetryAfter, string? Body)> TryCallOAuthApiAsync(
+        AppSettings settings, CancellationToken cancellationToken)
+    {
+        string credPath = settings.GetEffectiveClaudeCredentialsPath();
+        string credJson = await File.ReadAllTextAsync(credPath, cancellationToken);
+        using JsonDocument credDoc = JsonDocument.Parse(credJson);
+
+        string? accessToken = credDoc.RootElement.GetProperty("claudeAiOauth").GetProperty("accessToken").GetString();
+        if (string.IsNullOrWhiteSpace(accessToken))
+        {
+            return (false, null, null, null);
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.anthropic.com/api/oauth/usage");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        request.Headers.TryAddWithoutValidation("anthropic-beta", "oauth-2025-04-20");
+        request.Headers.UserAgent.ParseAdd("claude-code/2.0.0");
+
+        using HttpResponseMessage response = await Http.SendAsync(request, cancellationToken);
+        if (response.StatusCode == HttpStatusCode.TooManyRequests)
+        {
+            TimeSpan? retry = response.Headers.RetryAfter?.Delta;
+            return (false, HttpStatusCode.TooManyRequests, retry, null);
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return (false, response.StatusCode, null, null);
+        }
+
+        string body = await response.Content.ReadAsStringAsync(cancellationToken);
+        return (true, HttpStatusCode.OK, null, body);
+    }
+
+    private static List<QuotaItem> SynthesizeQuotas(
+        AppSettings settings,
+        PlanHistorySample? planHistory,
+        SessionDetails sessionDetails,
+        string? apiBody,
+        bool isTokenExpired)
+    {
+        var items = new List<QuotaItem>();
+
+        // Parse API body if available
+        JsonElement apiRoot = default;
+        bool hasApiRoot = false;
+        if (!string.IsNullOrWhiteSpace(apiBody))
+        {
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(apiBody);
+                apiRoot = doc.RootElement.Clone();
+                hasApiRoot = true;
+            }
+            catch { }
+        }
+
+        // --- 1. Five-Hour Session Quota ---
+        if (settings.ShowClaudeSession5h)
+        {
+            double fiveHourUsed = 0.0;
+            DateTimeOffset? fiveHourReset = null;
+            string source = "Claude Desktop / Code Local State";
+            string subtitle = sessionDetails.Subtitle ?? "Janela de sessão de 5 horas";
+
+            if (isTokenExpired)
+            {
+                subtitle = string.IsNullOrEmpty(subtitle) || subtitle == "Janela de sessão de 5 horas"
+                    ? "Token expirado • Clique em Reconectar"
+                    : $"{subtitle} • Token expirado";
+            }
+
+            // Priority 1: Live / cached Anthropic OAuth API
+            if (hasApiRoot && apiRoot.TryGetProperty("five_hour", out JsonElement fhEl) && fhEl.ValueKind == JsonValueKind.Object)
+            {
+                fiveHourUsed = fhEl.TryGetProperty("utilization", out JsonElement uEl) && uEl.TryGetDouble(out double u) ? u : 0.0;
+                if (fhEl.TryGetProperty("resets_at", out JsonElement rEl) && DateTimeOffset.TryParse(rEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset r))
+                {
+                    if (r > DateTimeOffset.UtcNow)
+                    {
+                        fiveHourReset = r;
+                    }
+                }
+                source = "Anthropic OAuth API";
+
+                if (fiveHourUsed >= 100.0 || (sessionDetails.ActiveRateLimitReset.HasValue && sessionDetails.ActiveRateLimitReset.Value > DateTimeOffset.UtcNow))
+                {
+                    subtitle = $"Limite de sessão atingido • {sessionDetails.ModelName ?? "Claude"}";
+                    if (!fiveHourReset.HasValue && sessionDetails.ActiveRateLimitReset.HasValue)
+                    {
+                        fiveHourReset = sessionDetails.ActiveRateLimitReset.Value;
+                    }
+                }
+            }
+            // Priority 2: Session log rate limit event
+            else if (sessionDetails.ActiveRateLimitReset.HasValue && sessionDetails.ActiveRateLimitReset.Value > DateTimeOffset.UtcNow)
+            {
+                fiveHourUsed = 100.0;
+                fiveHourReset = sessionDetails.ActiveRateLimitReset.Value;
+                source = "Claude Session Log (Limite Atingido)";
+                subtitle = $"Limite de sessão atingido • {sessionDetails.ModelName ?? "Claude"}";
+            }
+            // Priority 3: Claude Desktop plan history
+            else if (planHistory != null && planHistory.FiveHourUsedPercent.HasValue)
+            {
+                fiveHourUsed = planHistory.FiveHourUsedPercent.Value;
+                source = "Claude Desktop (plan-usage-history)";
+
+                if (sessionDetails.ActiveRateLimitReset.HasValue && sessionDetails.ActiveRateLimitReset.Value > DateTimeOffset.UtcNow)
+                {
+                    fiveHourReset = sessionDetails.ActiveRateLimitReset.Value;
+                }
+                else if (fiveHourUsed >= 99.0)
+                {
+                    // If 100% and no exact resetsAt found, estimate from sample timestamp + 5 hours
+                    fiveHourReset = planHistory.SampleTimeUtc.AddHours(5);
+                }
+            }
+
+            items.Add(new QuotaItem
+            {
+                Id = "claude.session",
+                Provider = QuotaProviderType.ClaudeCode,
+                ProviderBadge = "CLAUDE",
+                BadgeColorHex = "#D97757",
+                Title = "Claude Code (5h)",
+                UsedPercent = Math.Clamp(fiveHourUsed, 0.0, 100.0),
+                ResetTime = fiveHourReset,
+                Subtitle = subtitle,
+                SourceDetail = source,
+                IsAvailable = true,
+                SortOrder = 20
+            });
+        }
+
+        // --- 2. Seven-Day Consolidated Quota ---
+        if (settings.ShowClaudeWeekly7d)
+        {
+            double sevenDayUsed = 0.0;
+            DateTimeOffset? sevenDayReset = null;
+            string source = "Claude Desktop / Code Local State";
+
+            // Priority 1: Live / cached Anthropic OAuth API
+            if (hasApiRoot && apiRoot.TryGetProperty("seven_day", out JsonElement sdEl) && sdEl.ValueKind == JsonValueKind.Object)
+            {
+                sevenDayUsed = sdEl.TryGetProperty("utilization", out JsonElement uEl) && uEl.TryGetDouble(out double u) ? u : 0.0;
+                if (sdEl.TryGetProperty("resets_at", out JsonElement rEl) && DateTimeOffset.TryParse(rEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset r))
+                {
+                    if (r > DateTimeOffset.UtcNow)
+                    {
+                        sevenDayReset = r;
+                    }
+                }
+                source = "Anthropic OAuth API";
+            }
+            // Priority 2: Claude Desktop plan history
+            else if (planHistory != null && planHistory.SevenDayUsedPercent.HasValue)
+            {
+                sevenDayUsed = planHistory.SevenDayUsedPercent.Value;
+                source = "Claude Desktop (plan-usage-history)";
+            }
+
+            string weeklySubtitle = isTokenExpired
+                ? "Limite semanal consolidado • Token expirado"
+                : "Limite semanal consolidado (Opus/Sonnet)";
+
+            items.Add(new QuotaItem
+            {
+                Id = "claude.weekly",
+                Provider = QuotaProviderType.ClaudeCode,
+                ProviderBadge = "CLAUDE",
+                BadgeColorHex = "#D97757",
+                Title = "Claude Code (7d)",
+                UsedPercent = Math.Clamp(sevenDayUsed, 0.0, 100.0),
+                ResetTime = sevenDayReset,
+                Subtitle = weeklySubtitle,
+                SourceDetail = source,
+                IsAvailable = true,
+                SortOrder = 21
+            });
+        }
+
+        // --- 3. Dedicated Opus / Sonnet (if available from API or settings) ---
+        if (hasApiRoot)
+        {
+            if (settings.ShowClaudeOpus && apiRoot.TryGetProperty("seven_day_opus", out JsonElement opusEl) && opusEl.ValueKind == JsonValueKind.Object)
+            {
+                double u = opusEl.TryGetProperty("utilization", out JsonElement uEl) && uEl.TryGetDouble(out double v) ? v : 0.0;
+                DateTimeOffset? r = null;
+                if (opusEl.TryGetProperty("resets_at", out JsonElement rEl) && DateTimeOffset.TryParse(rEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset parsed))
+                    r = parsed;
+
+                items.Add(new QuotaItem
+                {
+                    Id = "claude.opus",
+                    Provider = QuotaProviderType.ClaudeCode,
+                    ProviderBadge = "CLAUDE",
+                    BadgeColorHex = "#D97757",
+                    Title = "Claude Opus (7d)",
+                    UsedPercent = Math.Clamp(u, 0.0, 100.0),
+                    ResetTime = r,
+                    Subtitle = "Cota semanal dedicada Opus",
+                    SourceDetail = "Anthropic OAuth API",
+                    IsAvailable = true,
+                    SortOrder = 22
+                });
+            }
+
+            if (settings.ShowClaudeSonnet && apiRoot.TryGetProperty("seven_day_sonnet", out JsonElement sonnetEl) && sonnetEl.ValueKind == JsonValueKind.Object)
+            {
+                double u = sonnetEl.TryGetProperty("utilization", out JsonElement uEl) && uEl.TryGetDouble(out double v) ? v : 0.0;
+                DateTimeOffset? r = null;
+                if (sonnetEl.TryGetProperty("resets_at", out JsonElement rEl) && DateTimeOffset.TryParse(rEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset parsed))
+                    r = parsed;
+
+                items.Add(new QuotaItem
+                {
+                    Id = "claude.sonnet",
+                    Provider = QuotaProviderType.ClaudeCode,
+                    ProviderBadge = "CLAUDE",
+                    BadgeColorHex = "#D97757",
+                    Title = "Claude Sonnet (7d)",
+                    UsedPercent = Math.Clamp(u, 0.0, 100.0),
+                    ResetTime = r,
+                    Subtitle = "Cota semanal dedicada Sonnet",
+                    SourceDetail = "Anthropic OAuth API",
+                    IsAvailable = true,
+                    SortOrder = 23
+                });
+            }
+        }
+
+        return items;
     }
 
     private void SaveCacheToDisk(string json)
@@ -173,234 +420,227 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         }
     }
 
-    private static List<QuotaItem> ParseUsageJson(
-        string body,
-        AppSettings settings,
-        string? sessionCostSubtitle,
-        bool isCached)
+    private static PlanHistorySample? TryGetLatestPlanUsageHistory()
     {
-        using JsonDocument doc = JsonDocument.Parse(body);
-        JsonElement root = doc.RootElement;
+        var candidatePaths = new List<string>();
 
-        string sourceTag = isCached
-            ? "Anthropic OAuth Usage API (Cache Local — Proteção 429)"
-            : "Anthropic OAuth Usage API";
-
-        var items = new List<QuotaItem>();
-
-        // 1. 5-Hour Session Quota
-        if (settings.ShowClaudeSession5h &&
-            root.TryGetProperty("five_hour", out JsonElement fiveHourEl) &&
-            fiveHourEl.ValueKind == JsonValueKind.Object)
+        // 1. Windows UWP package path (Centennial Claude App)
+        string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string packagesDir = Path.Combine(localApp, "Packages");
+        if (Directory.Exists(packagesDir))
         {
-            items.Add(ParseClaudeBucket(
-                fiveHourEl,
-                id: "claude.session",
-                title: "Claude Code (5h)",
-                subtitle: sessionCostSubtitle ?? "Janela de sessão de 5 horas",
-                sourceDetail: sourceTag,
-                sortOrder: 20));
-        }
-
-        // 2. 7-Day Weekly All-Models Quota
-        if (settings.ShowClaudeWeekly7d &&
-            root.TryGetProperty("seven_day", out JsonElement sevenDayEl) &&
-            sevenDayEl.ValueKind == JsonValueKind.Object)
-        {
-            items.Add(ParseClaudeBucket(
-                sevenDayEl,
-                id: "claude.weekly",
-                title: "Claude Code (7d)",
-                subtitle: "Limite semanal consolidado (Opus/Sonnet)",
-                sourceDetail: sourceTag,
-                sortOrder: 21));
-        }
-
-        // 3. Dedicated Opus 7-Day Quota
-        if (settings.ShowClaudeOpus)
-        {
-            if (root.TryGetProperty("seven_day_opus", out JsonElement opusEl) && opusEl.ValueKind == JsonValueKind.Object)
+            try
             {
-                items.Add(ParseClaudeBucket(
-                    opusEl,
-                    id: "claude.opus",
-                    title: "Claude Opus (7d)",
-                    subtitle: "Cota semanal dedicada Opus",
-                    sourceDetail: sourceTag,
-                    sortOrder: 22));
-            }
-            else if (settings.ShowClaudeDedicatedEvenIfEmpty)
-            {
-                items.Add(new QuotaItem
+                foreach (string dir in Directory.EnumerateDirectories(packagesDir, "Claude_*"))
                 {
-                    Id = "claude.opus",
-                    Provider = QuotaProviderType.ClaudeCode,
-                    ProviderBadge = "CLAUDE",
-                    BadgeColorHex = "#D97757",
-                    Title = "Claude Opus (7d)",
-                    UsedPercent = 0,
-                    Subtitle = "Compartilhado com cota semanal geral",
-                    SourceDetail = sourceTag,
-                    IsAvailable = true,
-                    SortOrder = 22
-                });
+                    candidatePaths.Add(Path.Combine(dir, "LocalCache", "Roaming", "Claude", "plan-usage-history.json"));
+                }
             }
+            catch { }
         }
 
-        // 4. Dedicated Sonnet 7-Day Quota
-        if (settings.ShowClaudeSonnet)
+        // 2. Standard Roaming path
+        string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        candidatePaths.Add(Path.Combine(roaming, "Claude", "plan-usage-history.json"));
+
+        foreach (string path in candidatePaths)
         {
-            if (root.TryGetProperty("seven_day_sonnet", out JsonElement sonnetEl) && sonnetEl.ValueKind == JsonValueKind.Object)
+            if (!File.Exists(path)) continue;
+
+            try
             {
-                items.Add(ParseClaudeBucket(
-                    sonnetEl,
-                    id: "claude.sonnet",
-                    title: "Claude Sonnet (7d)",
-                    subtitle: "Cota semanal dedicada Sonnet",
-                    sourceDetail: sourceTag,
-                    sortOrder: 23));
-            }
-            else if (settings.ShowClaudeDedicatedEvenIfEmpty)
-            {
-                items.Add(new QuotaItem
+                string json = File.ReadAllText(path);
+                using JsonDocument doc = JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("samples", out JsonElement samplesEl) && samplesEl.ValueKind == JsonValueKind.Array)
                 {
-                    Id = "claude.sonnet",
-                    Provider = QuotaProviderType.ClaudeCode,
-                    ProviderBadge = "CLAUDE",
-                    BadgeColorHex = "#D97757",
-                    Title = "Claude Sonnet (7d)",
-                    UsedPercent = 0,
-                    Subtitle = "Compartilhado com cota semanal geral",
-                    SourceDetail = sourceTag,
-                    IsAvailable = true,
-                    SortOrder = 23
-                });
+                    JsonElement? latestSample = null;
+                    foreach (JsonElement s in samplesEl.EnumerateArray())
+                    {
+                        latestSample = s;
+                    }
+
+                    if (latestSample.HasValue)
+                    {
+                        long t = latestSample.Value.TryGetProperty("t", out JsonElement tEl) && tEl.TryGetInt64(out long parsedT) ? parsedT : 0;
+                        DateTimeOffset sampleTime = t > 0 ? DateTimeOffset.FromUnixTimeMilliseconds(t) : DateTimeOffset.UtcNow;
+
+                        double? fh = null;
+                        double? sd = null;
+
+                        if (latestSample.Value.TryGetProperty("u", out JsonElement uEl) && uEl.ValueKind == JsonValueKind.Object)
+                        {
+                            if (uEl.TryGetProperty("fh", out JsonElement fhEl) && fhEl.TryGetDouble(out double parsedFh))
+                                fh = parsedFh;
+                            if (uEl.TryGetProperty("sd", out JsonElement sdEl) && sdEl.TryGetDouble(out double parsedSd))
+                                sd = parsedSd;
+                        }
+
+                        if (fh.HasValue || sd.HasValue)
+                        {
+                            return new PlanHistorySample(sampleTime, fh, sd);
+                        }
+                    }
+                }
             }
-        }
-
-        return items;
-    }
-
-    private static QuotaItem ParseClaudeBucket(
-        JsonElement bucketEl,
-        string id,
-        string title,
-        string? subtitle,
-        string sourceDetail,
-        int sortOrder)
-    {
-        double utilization = bucketEl.TryGetProperty("utilization", out JsonElement utilEl) && utilEl.TryGetDouble(out double u)
-            ? u
-            : 0.0;
-
-        DateTimeOffset? resetTime = null;
-        if (bucketEl.TryGetProperty("resets_at", out JsonElement raEl) &&
-            raEl.ValueKind == JsonValueKind.String &&
-            DateTimeOffset.TryParse(raEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset parsedReset))
-        {
-            resetTime = parsedReset;
-        }
-
-        return new QuotaItem
-        {
-            Id = id,
-            Provider = QuotaProviderType.ClaudeCode,
-            ProviderBadge = "CLAUDE",
-            BadgeColorHex = "#D97757",
-            Title = title,
-            UsedPercent = Math.Clamp(utilization, 0.0, 100.0),
-            ResetTime = resetTime,
-            Subtitle = subtitle,
-            SourceDetail = sourceDetail,
-            IsAvailable = true,
-            SortOrder = sortOrder
-        };
-    }
-
-    private static IReadOnlyList<QuotaItem> CreateFallbackList(string? sessionCostSubtitle, string reason)
-    {
-        return new[]
-        {
-            new QuotaItem
+            catch
             {
-                Id = "claude.session",
-                Provider = QuotaProviderType.ClaudeCode,
-                ProviderBadge = "CLAUDE",
-                BadgeColorHex = "#D97757",
-                Title = "Claude Code",
-                UsedPercent = 0,
-                IsAvailable = false,
-                Subtitle = sessionCostSubtitle != null ? $"{sessionCostSubtitle} • ({reason})" : reason,
-                SourceDetail = reason,
-                SortOrder = 20
+                // Ignore parse errors
             }
-        };
+        }
+
+        return null;
     }
 
-    private static string? TryGetLatestLocalSessionSummary()
+    private static SessionDetails TryGetLatestSessionDetails()
     {
         try
         {
-            string projectsDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".claude",
-                "projects");
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string projectsDir = Path.Combine(userProfile, ".claude", "projects");
 
             if (!Directory.Exists(projectsDir))
             {
-                return null;
+                return new SessionDetails(null, null, null);
             }
 
-            FileInfo? latestFile = new DirectoryInfo(projectsDir)
+            var recentFiles = new DirectoryInfo(projectsDir)
                 .EnumerateFiles("*.jsonl", SearchOption.AllDirectories)
+                .Where(f => f.LastWriteTimeUtc > DateTime.UtcNow.AddDays(-2))
                 .OrderByDescending(f => f.LastWriteTimeUtc)
-                .FirstOrDefault();
+                .Take(12)
+                .ToList();
 
-            if (latestFile == null)
+            if (recentFiles.Count == 0)
             {
-                return null;
+                return new SessionDetails(null, null, null);
             }
-
-            using var fs = new FileStream(latestFile.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var sr = new StreamReader(fs);
 
             string? lastCostLine = null;
-            string? line;
-            while ((line = sr.ReadLine()) != null)
+            string? lastRateLimitLine = null;
+            string? tokensLeftText = null;
+
+            foreach (var file in recentFiles)
             {
-                if (line.Contains("\"cost-state\"", StringComparison.Ordinal))
+                try
                 {
-                    lastCostLine = line;
+                    using var fs = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var sr = new StreamReader(fs);
+                    string? line;
+                    while ((line = sr.ReadLine()) != null)
+                    {
+                        if (lastCostLine == null && line.Contains("\"cost-state\"", StringComparison.Ordinal))
+                        {
+                            lastCostLine = line;
+                        }
+                        if (lastRateLimitLine == null && (line.Contains("\"resetsAt\"", StringComparison.Ordinal) ||
+                            line.Contains("\"usage_limit_reached\"", StringComparison.Ordinal)))
+                        {
+                            lastRateLimitLine = line;
+                        }
+                        if (tokensLeftText == null && line.Contains("total_tokens", StringComparison.Ordinal))
+                        {
+                            int idx = line.IndexOf("<total_tokens>", StringComparison.Ordinal);
+                            if (idx >= 0)
+                            {
+                                int endIdx = line.IndexOf("</total_tokens>", idx, StringComparison.Ordinal);
+                                if (endIdx > idx)
+                                {
+                                    string raw = line.Substring(idx + 14, endIdx - (idx + 14)).Trim();
+                                    string[] parts = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                                    if (parts.Length > 0 && long.TryParse(parts[0], out long tokCount))
+                                    {
+                                        tokensLeftText = tokCount >= 1_000_000
+                                            ? string.Create(CultureInfo.InvariantCulture, $"{(tokCount / 1_000_000.0):0.1}M tok")
+                                            : string.Create(CultureInfo.InvariantCulture, $"{tokCount / 1_000}k tok");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                if (lastCostLine != null && lastRateLimitLine != null)
+                {
+                    break;
                 }
             }
 
-            if (string.IsNullOrWhiteSpace(lastCostLine))
+            DateTimeOffset? activeReset = null;
+            if (!string.IsNullOrWhiteSpace(lastRateLimitLine))
             {
-                return null;
-            }
-
-            using JsonDocument doc = JsonDocument.Parse(lastCostLine);
-            JsonElement root = doc.RootElement;
-
-            double costUsd = root.TryGetProperty("totalCostUSD", out JsonElement costEl) && costEl.TryGetDouble(out double c)
-                ? c
-                : 0.0;
-
-            var modelNames = new List<string>();
-            if (root.TryGetProperty("modelUsage", out JsonElement muEl) && muEl.ValueKind == JsonValueKind.Object)
-            {
-                foreach (JsonProperty prop in muEl.EnumerateObject())
+                try
                 {
-                    modelNames.Add(FormatShortModelName(prop.Name));
+                    using JsonDocument doc = JsonDocument.Parse(lastRateLimitLine);
+                    JsonElement root = doc.RootElement;
+
+                    long resetsAtUnix = 0;
+                    if (root.TryGetProperty("apiErrorParams", out JsonElement aepEl) &&
+                        aepEl.TryGetProperty("rate_limit_info", out JsonElement rliEl) &&
+                        rliEl.TryGetProperty("resetsAt", out JsonElement raEl) &&
+                        raEl.TryGetInt64(out long ra1))
+                    {
+                        resetsAtUnix = ra1;
+                    }
+                    else if (root.TryGetProperty("quotaLimits", out JsonElement qlEl) &&
+                             qlEl.TryGetProperty("resetsAt", out JsonElement raEl2) &&
+                             raEl2.TryGetInt64(out long ra2))
+                    {
+                        resetsAtUnix = ra2;
+                    }
+
+                    if (resetsAtUnix > 0)
+                    {
+                        var parsed = DateTimeOffset.FromUnixTimeSeconds(resetsAtUnix);
+                        if (parsed > DateTimeOffset.UtcNow)
+                        {
+                            activeReset = parsed;
+                        }
+                    }
                 }
+                catch { }
             }
 
-            string modelsText = modelNames.Count > 0 ? string.Join(", ", modelNames.Distinct()) : "Claude";
-            return string.Create(CultureInfo.InvariantCulture, $"Última sessão: ${costUsd:F2} • {modelsText}");
+            string? subtitle = null;
+            string? mainModelName = null;
+
+            if (!string.IsNullOrWhiteSpace(lastCostLine))
+            {
+                try
+                {
+                    using JsonDocument doc = JsonDocument.Parse(lastCostLine);
+                    JsonElement root = doc.RootElement;
+
+                    double costUsd = root.TryGetProperty("totalCostUSD", out JsonElement costEl) && costEl.TryGetDouble(out double c) ? c : 0.0;
+                    var modelNames = new List<string>();
+                    if (root.TryGetProperty("modelUsage", out JsonElement muEl) && muEl.ValueKind == JsonValueKind.Object)
+                    {
+                        foreach (JsonProperty prop in muEl.EnumerateObject())
+                        {
+                            modelNames.Add(FormatShortModelName(prop.Name));
+                        }
+                    }
+
+                    mainModelName = modelNames.FirstOrDefault();
+                    string modelsText = modelNames.Count > 0 ? string.Join(", ", modelNames.Distinct()) : "Claude";
+
+                    if (!string.IsNullOrEmpty(tokensLeftText))
+                    {
+                        subtitle = string.Create(CultureInfo.InvariantCulture, $"{tokensLeftText} • Sessão: ${costUsd:F2} • {modelsText}");
+                    }
+                    else
+                    {
+                        subtitle = string.Create(CultureInfo.InvariantCulture, $"Última sessão: ${costUsd:F2} • {modelsText}");
+                    }
+                }
+                catch { }
+            }
+
+            return new SessionDetails(subtitle, activeReset, mainModelName);
         }
         catch
         {
-            return null;
+            return new SessionDetails(null, null, null);
         }
     }
 
@@ -415,4 +655,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         if (rawModel.Contains("haiku", StringComparison.OrdinalIgnoreCase)) return "Haiku";
         return rawModel;
     }
+
+    private sealed record PlanHistorySample(DateTimeOffset SampleTimeUtc, double? FiveHourUsedPercent, double? SevenDayUsedPercent);
+    private sealed record SessionDetails(string? Subtitle, DateTimeOffset? ActiveRateLimitReset, string? ModelName);
 }

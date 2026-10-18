@@ -6,9 +6,9 @@ namespace AIUsageTracker.Views;
 
 public partial class SettingsWindow : Window
 {
-    public SettingsWindow(SettingsService settingsService)
+    public SettingsWindow(SettingsService settingsService, System.Action? testNotificationAction = null)
     {
         InitializeComponent();
-        DataContext = new SettingsViewModel(settingsService, Close);
+        DataContext = new SettingsViewModel(settingsService, Close, testNotificationAction);
     }
 }
