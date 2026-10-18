@@ -230,7 +230,7 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                 Provider = QuotaProviderType.Antigravity,
                 ProviderBadge = "GEMINI",
                 BadgeColorHex = "#06B6D4",
-                Title = "Gemini Models (7d)",
+                Title = "Gemini 3.8 Flash (7d)",
                 IsAvailable = false,
                 Subtitle = "Servidor local não fornece cota semanal; abra o Antigravity 2.x",
                 SourceDetail = "Requer RetrieveUserQuotaSummary",
@@ -336,12 +336,12 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                     Provider = QuotaProviderType.Antigravity,
                     ProviderBadge = "GEMINI",
                     BadgeColorHex = "#06B6D4",
-                    Title = weekly ? "Gemini Models (7d)" : "Gemini Models (5h)",
+                    Title = weekly ? "Gemini 3.8 Flash (7d)" : "Gemini 3.8 Flash (5h)",
                     UsedPercent = used,
                     ResetTime = resetTime,
                     Subtitle = string.IsNullOrWhiteSpace(description)
-                        ? (weekly ? "Cota semanal compartilhada (inclui Gemini 3.8 Flash)" : "Cota de 5 horas compartilhada")
-                        : (weekly ? $"Cota semanal compartilhada (Flash / Pro) • {description}" : $"Cota compartilhada • {description}"),
+                        ? (weekly ? "Cota semanal Gemini 3.8 Flash" : "Cota de 5 horas Gemini 3.8 Flash")
+                        : (weekly ? $"Cota semanal Gemini 3.8 Flash • {description}" : $"Cota Gemini 3.8 Flash • {description}"),
                     SourceDetail = "Antigravity RetrieveUserQuotaSummary (local)",
                     IsAvailable = true,
                     SortOrder = weekly ? 32 : 31

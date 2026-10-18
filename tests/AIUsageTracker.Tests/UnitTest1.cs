@@ -319,7 +319,7 @@ public class QuotaTrackerTests
 
         var weeklyItem = items.FirstOrDefault(x => x.Id == "agy.gemini_weekly");
         Assert.NotNull(weeklyItem);
-        Assert.Equal("Gemini Models (7d)", weeklyItem.Title);
+        Assert.Equal("Gemini 3.8 Flash (7d)", weeklyItem.Title);
         // Must NOT be 100% used / 0% remaining (Argon bucket)
         Assert.InRange(weeklyItem.UsedPercent, 44.0, 45.0);
         Assert.InRange(weeklyItem.RemainingPercent, 55.0, 56.0);

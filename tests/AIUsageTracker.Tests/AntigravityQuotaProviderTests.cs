@@ -53,7 +53,7 @@ public class AntigravityQuotaProviderTests
         Assert.True(session.IsAvailable);
 
         var weekly = Assert.Single(result, x => x.Id == "agy.gemini_weekly");
-        Assert.Equal("Gemini Models (7d)", weekly.Title);
+        Assert.Equal("Gemini 3.8 Flash (7d)", weekly.Title);
         Assert.Equal(58, weekly.UsedPercent, 4);
         Assert.Equal(DateTimeOffset.Parse("2026-10-24T15:00:00Z"), weekly.ResetTime);
         Assert.True(weekly.IsAvailable);
