@@ -97,7 +97,8 @@ public sealed class QuotaPollingService : IDisposable
             s.EnableClaudeCode, s.ShowClaudeSession5h, s.ShowClaudeWeekly7d, s.ShowClaudeOpus,
             s.ShowClaudeSonnet, s.ShowClaudeDedicatedEvenIfEmpty, s.ShowClaudeSessionCostSubtitle, s.CustomClaudeCredentialsPath,
             s.EnableAntigravity, s.GroupAntigravityEffortLevels, s.ShowAntigravityArgon,
-            s.ShowAntigravityFlash, s.ShowAntigravityGeminiWeekly, s.ShowAntigravityClaudeOpus, s.ShowAntigravityClaudeSonnet, s.ShowAntigravityGptOss);
+            s.ShowAntigravityFlash, s.ShowAntigravityGeminiWeekly, s.ShowAntigravityClaudeOpus, s.ShowAntigravityClaudeSonnet, s.ShowAntigravityGptOss,
+            s.EnableAntigravityCliFallback, s.CustomAgyCliPath);
     }
 
     public async Task<IReadOnlyList<QuotaItem>> RefreshNowAsync(CancellationToken cancellationToken = default)

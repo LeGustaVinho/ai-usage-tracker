@@ -439,6 +439,9 @@
                                           Content="Habilitar monitoramento do Gemini / Antigravity"
                                           IsChecked="{Binding Draft.EnableAntigravity}" />
                                 <CheckBox Margin="18,4,0,4"
+                                          Content="Buscar cota via CLI (agy) caso o Antigravity esteja fechado"
+                                          IsChecked="{Binding Draft.EnableAntigravityCliFallback}" />
+                                <CheckBox Margin="18,4,0,4"
                                           Content="Agrupar níveis de esforço (Low / Medium / High) em uma barra por modelo"
                                           IsChecked="{Binding Draft.GroupAntigravityEffortLevels}" />
                                 <CheckBox Margin="18,4,0,4"

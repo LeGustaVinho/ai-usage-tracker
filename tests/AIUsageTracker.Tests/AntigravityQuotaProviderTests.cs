@@ -164,4 +164,184 @@ public class AntigravityQuotaProviderTests
         Assert.Contains(result, x => x.Id == "agy.gemini_flash" && x.IsAvailable);
         Assert.Contains(result, x => x.Id == "agy.gemini_weekly" && !x.IsAvailable);
     }
+
+    [Fact]
+    public void AntigravityQuotaProvider_ParsesCliQuotaResponseCorrectly()
+    {
+        const string cliJson = """
+            {
+              "conversation_id": "",
+              "status": "SUCCESS",
+              "command": {
+                "name": "usage",
+                "data": {
+                  "groups": [
+                    {
+                      "name": "Gemini Models",
+                      "description": "Models within this group: Gemini Flash, Gemini Pro",
+                      "buckets": [
+                        {
+                          "id": "gemini-weekly",
+                          "name": "Weekly Limit Remaining",
+                          "description": "Weekly refresh in 5 days",
+                          "window": "weekly",
+                          "remaining_fraction": 0.52,
+                          "reset_time": "2026-10-24T03:24:10Z"
+                        },
+                        {
+                          "id": "gemini-5h",
+                          "name": "Five Hour Limit Remaining",
+                          "description": "5h refresh in 3 hours",
+                          "window": "5h",
+                          "remaining_fraction": 0.88,
+                          "reset_time": "2026-10-18T15:33:14Z"
+                        }
+                      ]
+                    },
+                    {
+                      "name": "Gemini 4 Argon",
+                      "buckets": [
+                        {
+                          "id": "gemini-argon-wtu-weekly",
+                          "name": "Gemini 4 Argon Weekly Limit",
+                          "window": "weekly",
+                          "remaining_fraction": 0.0,
+                          "reset_time": "2026-10-24T01:43:58Z"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+            """;
+
+        var settings = new AppSettings
+        {
+            ShowAntigravityFlash = true,
+            ShowAntigravityGeminiWeekly = true,
+            ShowAntigravityArgon = true
+        };
+
+        var items = AntigravityQuotaProvider.ParseCliQuotaResponse(cliJson, settings);
+        Assert.Equal(3, items.Count);
+
+        var flash5h = Assert.Single(items, x => x.Id == "agy.gemini_flash");
+        Assert.Equal("Gemini 3.8 Flash (5h)", flash5h.Title);
+        Assert.InRange(flash5h.UsedPercent, 11.9, 12.1);
+        Assert.InRange(flash5h.RemainingPercent, 87.9, 88.1);
+        Assert.Equal("Antigravity CLI (agy /quota)", flash5h.SourceDetail);
+        Assert.True(flash5h.IsAvailable);
+
+        var flash7d = Assert.Single(items, x => x.Id == "agy.gemini_weekly");
+        Assert.Equal("Gemini 3.8 Flash (7d)", flash7d.Title);
+        Assert.InRange(flash7d.UsedPercent, 47.9, 48.1);
+        Assert.InRange(flash7d.RemainingPercent, 51.9, 52.1);
+        Assert.Equal("Antigravity CLI (agy /quota)", flash7d.SourceDetail);
+        Assert.True(flash7d.IsAvailable);
+
+        var argon = Assert.Single(items, x => x.Id == "agy.gemini_argon");
+        Assert.Equal("Gemini 4 Argon", argon.Title);
+        Assert.Equal(100.0, argon.UsedPercent);
+        Assert.Equal(0.0, argon.RemainingPercent);
+        Assert.Equal("Antigravity CLI (agy /quota)", argon.SourceDetail);
+        Assert.True(argon.IsAvailable);
+    }
+
+    [Fact]
+    public void AntigravityQuotaProvider_SavesAndRestoresLastKnownQuotasWhenOffline()
+    {
+        string tempCache = Path.Combine(Path.GetTempPath(), $"agy_quota_test_{Guid.NewGuid():N}.json");
+        AntigravityQuotaProvider.CustomCacheFilePath = tempCache;
+        AntigravityQuotaProvider.ClearCache();
+
+        try
+        {
+            var initialItems = new List<QuotaItem>
+            {
+                new()
+                {
+                    Id = "agy.gemini_flash",
+                    Provider = QuotaProviderType.Antigravity,
+                    ProviderBadge = "GEMINI",
+                    BadgeColorHex = "#06B6D4",
+                    Title = "Gemini 3.8 Flash (5h)",
+                    UsedPercent = 15.0,
+                    ResetTime = DateTimeOffset.UtcNow.AddHours(3),
+                    Subtitle = "Cota de 5 horas Gemini 3.8 Flash",
+                    SourceDetail = "Antigravity language_server Connect-RPC",
+                    IsAvailable = true,
+                    SortOrder = 31
+                },
+                new()
+                {
+                    Id = "agy.gemini_weekly",
+                    Provider = QuotaProviderType.Antigravity,
+                    ProviderBadge = "GEMINI",
+                    BadgeColorHex = "#06B6D4",
+                    Title = "Gemini 3.8 Flash (7d)",
+                    UsedPercent = 45.0,
+                    ResetTime = DateTimeOffset.UtcNow.AddDays(5),
+                    Subtitle = "Cota semanal Gemini 3.8 Flash",
+                    SourceDetail = "Antigravity RetrieveUserQuotaSummary",
+                    IsAvailable = true,
+                    SortOrder = 32
+                },
+                new()
+                {
+                    Id = "agy.gemini_argon",
+                    Provider = QuotaProviderType.Antigravity,
+                    ProviderBadge = "ARGON",
+                    BadgeColorHex = "#3B82F6",
+                    Title = "Gemini 4 Argon",
+                    UsedPercent = 100.0,
+                    ResetTime = DateTimeOffset.UtcNow.AddDays(5),
+                    Subtitle = "Cota compartilhada",
+                    SourceDetail = "Antigravity language_server Connect-RPC",
+                    IsAvailable = true,
+                    SortOrder = 30
+                }
+            };
+
+            AntigravityQuotaProvider.SaveLastKnownQuotas(initialItems);
+
+            // Clear in-memory cache to force disk load
+            AntigravityQuotaProvider.ClearCache();
+
+            var settings = new AppSettings
+            {
+                ShowAntigravityFlash = true,
+                ShowAntigravityGeminiWeekly = true,
+                ShowAntigravityArgon = true
+            };
+
+            var restored = AntigravityQuotaProvider.GetLastKnownQuotas(settings);
+            Assert.NotNull(restored);
+            Assert.Equal(3, restored.Count);
+
+            var flash = Assert.Single(restored, x => x.Id == "agy.gemini_flash");
+            Assert.True(flash.IsAvailable);
+            Assert.Equal(15.0, flash.UsedPercent);
+            Assert.Contains("Última cota conhecida", flash.Subtitle);
+
+            var weekly = Assert.Single(restored, x => x.Id == "agy.gemini_weekly");
+            Assert.True(weekly.IsAvailable);
+            Assert.Equal(45.0, weekly.UsedPercent);
+            Assert.Contains("Última cota conhecida", weekly.Subtitle);
+
+            var argon = Assert.Single(restored, x => x.Id == "agy.gemini_argon");
+            Assert.True(argon.IsAvailable);
+            Assert.Equal(100.0, argon.UsedPercent);
+            Assert.Contains("Última cota conhecida", argon.Subtitle);
+        }
+        finally
+        {
+            AntigravityQuotaProvider.CustomCacheFilePath = string.Empty;
+            AntigravityQuotaProvider.ClearCache();
+            if (File.Exists(tempCache))
+            {
+                File.Delete(tempCache);
+            }
+        }
+    }
 }

@@ -59,6 +59,22 @@ public sealed class AppSettings
     public bool ShowAntigravityClaudeOpus { get; set; } = true;
     public bool ShowAntigravityClaudeSonnet { get; set; } = true;
     public bool ShowAntigravityGptOss { get; set; } = false;
+    public bool EnableAntigravityCliFallback { get; set; } = true;
+    public string CustomAgyCliPath { get; set; } = string.Empty;
+
+    public string GetEffectiveAgyCliPath()
+    {
+        if (!string.IsNullOrWhiteSpace(CustomAgyCliPath))
+        {
+            return Environment.ExpandEnvironmentVariables(CustomAgyCliPath);
+        }
+        string localAgy = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "agy", "bin", "agy.exe");
+        if (File.Exists(localAgy))
+        {
+            return localAgy;
+        }
+        return "agy.exe";
+    }
 
     public string GetEffectiveCodexAuthPath()
     {
