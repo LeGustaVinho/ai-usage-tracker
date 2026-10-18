@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
@@ -16,11 +17,15 @@ public sealed class ClaudeAuthService : IDisposable
     {
         Timeout = TimeSpan.FromSeconds(15)
     };
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> RefreshLocks = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly SettingsService _settingsService;
     private FileSystemWatcher? _watcher;
     private DateTimeOffset _lastAutoLoginAttemptUtc = DateTimeOffset.MinValue;
     private readonly object _loginLock = new();
+    private readonly EventHandler<AppSettings> _settingsChangedHandler;
+    private readonly SemaphoreSlim _autoLoginGate = new(1, 1);
+    private bool _disposed;
 
     public event EventHandler? CredentialsChanged;
     public event EventHandler<bool>? TokenExpiredStateChanged;
@@ -30,13 +35,15 @@ public sealed class ClaudeAuthService : IDisposable
     public ClaudeAuthService(SettingsService settingsService)
     {
         _settingsService = settingsService;
+        _settingsChangedHandler = (_, _) => SetupWatcher();
         SetupWatcher();
-        _settingsService.SettingsChanged += (_, _) => SetupWatcher();
+        _settingsService.SettingsChanged += _settingsChangedHandler;
         IsExpired = CheckTokenExpired();
     }
 
     private void SetupWatcher()
     {
+        if (_disposed) return;
         _watcher?.Dispose();
         _watcher = null;
 
@@ -56,6 +63,7 @@ public sealed class ClaudeAuthService : IDisposable
 
                 _watcher.Changed += OnFileChanged;
                 _watcher.Created += OnFileChanged;
+                _watcher.Renamed += OnFileChanged;
             }
         }
         catch
@@ -66,6 +74,7 @@ public sealed class ClaudeAuthService : IDisposable
 
     private void OnFileChanged(object sender, FileSystemEventArgs e)
     {
+        if (_disposed) return;
         UpdateTokenExpiredStatus();
         CredentialsChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -141,6 +150,10 @@ public sealed class ClaudeAuthService : IDisposable
             using JsonDocument doc = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("claudeAiOauth", out JsonElement oauthEl))
             {
+                if (!oauthEl.TryGetProperty("accessToken", out JsonElement tokenEl) ||
+                    tokenEl.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(tokenEl.GetString()))
+                    return true;
+
                 if (oauthEl.TryGetProperty("expiresAt", out JsonElement expEl) &&
                     expEl.TryGetInt64(out long expiresAt))
                 {
@@ -163,6 +176,12 @@ public sealed class ClaudeAuthService : IDisposable
         string credPath = settings.GetEffectiveClaudeCredentialsPath();
         if (!File.Exists(credPath)) return false;
 
+        var refreshLock = RefreshLocks.GetOrAdd(Path.GetFullPath(credPath), _ => new SemaphoreSlim(1, 1));
+        string? initialJson;
+        try { initialJson = await File.ReadAllTextAsync(credPath, cancellationToken); }
+        catch (IOException) { return false; }
+        await refreshLock.WaitAsync(cancellationToken);
+
         try
         {
             string json = await File.ReadAllTextAsync(credPath, cancellationToken);
@@ -179,6 +198,15 @@ public sealed class ClaudeAuthService : IDisposable
             }
 
             string refreshToken = rtEl.GetString()!;
+            // Another caller may have refreshed this token while we waited for the lock.
+            if (initialJson != json && oauthEl.TryGetProperty("accessToken", out JsonElement existingToken) &&
+                existingToken.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(existingToken.GetString()) &&
+                oauthEl.TryGetProperty("expiresAt", out JsonElement existingExpiry) &&
+                existingExpiry.TryGetInt64(out long existingExpiresAt) &&
+                existingExpiresAt > DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeMilliseconds())
+                return true;
+
             var scopes = new List<string>();
             if (oauthEl.TryGetProperty("scopes", out JsonElement scEl) && scEl.ValueKind == JsonValueKind.Array)
             {
@@ -236,7 +264,12 @@ public sealed class ClaudeAuthService : IDisposable
                 long newExpiresAt = nowMs + (expiresInSec * 1000);
                 long newRtExpiresAt = nowMs + (rtExpiresInSec * 1000);
 
-                var updatedDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json) ?? new();
+                // Never overwrite a newer login or a refresh performed by another process.
+                string latestJson = await File.ReadAllTextAsync(credPath, cancellationToken);
+                if (latestJson != json)
+                    return IsTokenExpiredStatic(settings) == false;
+
+                var updatedDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(latestJson) ?? new();
                 var oauthDict = updatedDict.TryGetValue("claudeAiOauth", out JsonElement curOauth)
                     ? JsonSerializer.Deserialize<Dictionary<string, object?>>(curOauth.GetRawText()) ?? new()
                     : new();
@@ -248,7 +281,19 @@ public sealed class ClaudeAuthService : IDisposable
                 updatedDict["claudeAiOauth"] = JsonSerializer.SerializeToElement(oauthDict);
 
                 string newJson = JsonSerializer.Serialize(updatedDict, new JsonSerializerOptions { WriteIndented = true });
-                await File.WriteAllTextAsync(credPath, newJson, cancellationToken);
+                string tempPath = Path.Combine(Path.GetDirectoryName(credPath)!, $".{Path.GetFileName(credPath)}.{Guid.NewGuid():N}.tmp");
+                try
+                {
+                    await File.WriteAllTextAsync(tempPath, newJson, cancellationToken);
+                    // Other processes may replace the credentials file during the network call.
+                    if (await File.ReadAllTextAsync(credPath, cancellationToken) != latestJson)
+                        return !IsTokenExpiredStatic(settings);
+                    File.Move(tempPath, credPath, overwrite: true);
+                }
+                finally
+                {
+                    if (File.Exists(tempPath)) File.Delete(tempPath);
+                }
                 return true;
             }
         }
@@ -256,18 +301,31 @@ public sealed class ClaudeAuthService : IDisposable
         {
             return false;
         }
+        finally
+        {
+            refreshLock.Release();
+        }
 
         return false;
     }
 
     public bool TryAutoLogin(bool force = false)
     {
-        _ = TryAutoLoginAsync(force);
+        _ = RunAutoLoginSafelyAsync(force);
         return true;
+    }
+
+    private async Task RunAutoLoginSafelyAsync(bool force)
+    {
+        try { await TryAutoLoginAsync(force); }
+        catch (Exception ex) { Debug.WriteLine($"Claude login failed: {ex}"); }
     }
 
     public async Task<bool> TryAutoLoginAsync(bool force = false)
     {
+        if (!await _autoLoginGate.WaitAsync(0)) return false;
+        try
+        {
         if (!force)
         {
             if (!CheckTokenExpired())
@@ -299,6 +357,8 @@ public sealed class ClaudeAuthService : IDisposable
             LaunchInteractiveLogin();
             return true;
         }
+        }
+        finally { _autoLoginGate.Release(); }
     }
 
     public static void LaunchInteractiveLogin()
@@ -322,6 +382,8 @@ public sealed class ClaudeAuthService : IDisposable
 
     public void Dispose()
     {
+        _disposed = true;
+        _settingsService.SettingsChanged -= _settingsChangedHandler;
         _watcher?.Dispose();
     }
 }

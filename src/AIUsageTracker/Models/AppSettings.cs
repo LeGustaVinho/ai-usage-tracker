@@ -55,6 +55,7 @@ public sealed class AppSettings
     public bool GroupAntigravityEffortLevels { get; set; } = true;
     public bool ShowAntigravityArgon { get; set; } = true;
     public bool ShowAntigravityFlash { get; set; } = true;
+    public bool ShowAntigravityGeminiWeekly { get; set; } = true;
     public bool ShowAntigravityClaudeOpus { get; set; } = true;
     public bool ShowAntigravityClaudeSonnet { get; set; } = true;
     public bool ShowAntigravityGptOss { get; set; } = false;

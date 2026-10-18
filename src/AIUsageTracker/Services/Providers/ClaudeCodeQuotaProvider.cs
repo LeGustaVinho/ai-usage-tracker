@@ -21,10 +21,13 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
     };
 
     private static readonly TimeSpan MinApiPollInterval = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan MaxCachedApiAge = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan MaxPlanHistoryAge = TimeSpan.FromMinutes(10);
 
     private readonly string _cacheFilePath;
     private DateTimeOffset _nextAllowedApiCallUtc = DateTimeOffset.MinValue;
     private string? _lastValidApiJson;
+    private DateTimeOffset _lastValidApiTimeUtc;
 
     public QuotaProviderType ProviderType => QuotaProviderType.ClaudeCode;
 
@@ -39,7 +42,15 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         {
             try
             {
-                _lastValidApiJson = File.ReadAllText(_cacheFilePath);
+                if (DateTimeOffset.UtcNow - File.GetLastWriteTimeUtc(_cacheFilePath) <= MaxCachedApiAge)
+                {
+                    string candidate = File.ReadAllText(_cacheFilePath);
+                    if (IsValidUsageApiResponse(candidate))
+                    {
+                        _lastValidApiJson = candidate;
+                        _lastValidApiTimeUtc = File.GetLastWriteTimeUtc(_cacheFilePath);
+                    }
+                }
             }
             catch
             {
@@ -75,12 +86,13 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 }
 
                 var apiResult = await TryCallOAuthApiAsync(settings, cancellationToken);
-                if (apiResult.Success && !string.IsNullOrWhiteSpace(apiResult.Body))
+                if (apiResult.Success && IsValidUsageApiResponse(apiResult.Body))
                 {
                     apiBody = apiResult.Body;
                     _lastValidApiJson = apiBody;
+                    _lastValidApiTimeUtc = DateTimeOffset.UtcNow;
                     _nextAllowedApiCallUtc = DateTimeOffset.UtcNow.Add(MinApiPollInterval);
-                    SaveCacheToDisk(apiBody);
+                    SaveCacheToDisk(apiBody!);
                 }
                 else if (apiResult.StatusCode == HttpStatusCode.Unauthorized)
                 {
@@ -89,12 +101,13 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                     if (refreshed)
                     {
                         var retryResult = await TryCallOAuthApiAsync(settings, cancellationToken);
-                        if (retryResult.Success && !string.IsNullOrWhiteSpace(retryResult.Body))
+                        if (retryResult.Success && IsValidUsageApiResponse(retryResult.Body))
                         {
                             apiBody = retryResult.Body;
                             _lastValidApiJson = apiBody;
+                            _lastValidApiTimeUtc = DateTimeOffset.UtcNow;
                             _nextAllowedApiCallUtc = DateTimeOffset.UtcNow.Add(MinApiPollInterval);
-                            SaveCacheToDisk(apiBody);
+                            SaveCacheToDisk(apiBody!);
                         }
                     }
                 }
@@ -112,7 +125,9 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         bool isTokenExpired = ClaudeAuthService.IsTokenExpiredStatic(settings);
 
         // 4. Synthesize the most accurate, real-time quota items (using apiBody or cached API)
-        var items = SynthesizeQuotas(settings, planHistory, sessionDetails, apiBody ?? _lastValidApiJson, isTokenExpired);
+        string? recentCachedApi = DateTimeOffset.UtcNow - _lastValidApiTimeUtc <= MaxCachedApiAge
+            ? _lastValidApiJson : null;
+        var items = SynthesizeQuotas(settings, planHistory, sessionDetails, apiBody ?? recentCachedApi, isTokenExpired);
         if (items.Count > 0)
         {
             return items;
@@ -169,6 +184,33 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         {
             return false;
         }
+
+        return false;
+    }
+
+    private static bool IsValidUsageApiResponse(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return false;
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+
+            foreach (string key in new[] { "five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet" })
+            {
+                if (doc.RootElement.TryGetProperty(key, out JsonElement window) &&
+                    window.ValueKind == JsonValueKind.Object &&
+                    window.TryGetProperty("utilization", out JsonElement utilization) &&
+                    utilization.ValueKind == JsonValueKind.Number &&
+                    utilization.TryGetDouble(out double value) && double.IsFinite(value) &&
+                    value >= 0 && value <= 100)
+                {
+                    return true;
+                }
+            }
+        }
+        catch (JsonException) { }
 
         return false;
     }
@@ -245,7 +287,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                     : $"{subtitle} • Token expirado";
             }
 
-            // Priority 1: Live / cached Anthropic OAuth API
+            // Priority 1: Recent Anthropic OAuth API
             if (hasApiRoot && apiRoot.TryGetProperty("five_hour", out JsonElement fhEl) && fhEl.ValueKind == JsonValueKind.Object)
             {
                 fiveHourUsed = fhEl.TryGetProperty("utilization", out JsonElement uEl) && uEl.TryGetDouble(out double u) ? u : 0.0;
@@ -303,7 +345,10 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 ResetTime = fiveHourReset,
                 Subtitle = subtitle,
                 SourceDetail = source,
-                IsAvailable = true,
+                IsAvailable = (hasApiRoot && apiRoot.TryGetProperty("five_hour", out JsonElement fiveHourWindow) &&
+                    fiveHourWindow.ValueKind == JsonValueKind.Object && fiveHourWindow.TryGetProperty("utilization", out _)) ||
+                    (planHistory?.FiveHourUsedPercent.HasValue ?? false) ||
+                    (sessionDetails.ActiveRateLimitReset > DateTimeOffset.UtcNow),
                 SortOrder = 20
             });
         }
@@ -350,7 +395,9 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 ResetTime = sevenDayReset,
                 Subtitle = weeklySubtitle,
                 SourceDetail = source,
-                IsAvailable = true,
+                IsAvailable = (hasApiRoot && apiRoot.TryGetProperty("seven_day", out JsonElement sevenDayWindow) &&
+                    sevenDayWindow.ValueKind == JsonValueKind.Object && sevenDayWindow.TryGetProperty("utilization", out _)) ||
+                    (planHistory?.SevenDayUsedPercent.HasValue ?? false),
                 SortOrder = 21
             });
         }
@@ -443,6 +490,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         candidatePaths.Add(Path.Combine(roaming, "Claude", "plan-usage-history.json"));
 
+        PlanHistorySample? latest = null;
         foreach (string path in candidatePaths)
         {
             if (!File.Exists(path)) continue;
@@ -453,21 +501,19 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 using JsonDocument doc = JsonDocument.Parse(json);
                 if (doc.RootElement.TryGetProperty("samples", out JsonElement samplesEl) && samplesEl.ValueKind == JsonValueKind.Array)
                 {
-                    JsonElement? latestSample = null;
                     foreach (JsonElement s in samplesEl.EnumerateArray())
                     {
-                        latestSample = s;
-                    }
-
-                    if (latestSample.HasValue)
-                    {
-                        long t = latestSample.Value.TryGetProperty("t", out JsonElement tEl) && tEl.TryGetInt64(out long parsedT) ? parsedT : 0;
-                        DateTimeOffset sampleTime = t > 0 ? DateTimeOffset.FromUnixTimeMilliseconds(t) : DateTimeOffset.UtcNow;
+                        if (s.ValueKind != JsonValueKind.Object) continue;
+                        long t = s.TryGetProperty("t", out JsonElement tEl) && tEl.TryGetInt64(out long parsedT) ? parsedT : 0;
+                        if (t <= 0) continue;
+                        DateTimeOffset sampleTime;
+                        try { sampleTime = DateTimeOffset.FromUnixTimeMilliseconds(t); }
+                        catch (ArgumentOutOfRangeException) { continue; }
 
                         double? fh = null;
                         double? sd = null;
 
-                        if (latestSample.Value.TryGetProperty("u", out JsonElement uEl) && uEl.ValueKind == JsonValueKind.Object)
+                        if (s.TryGetProperty("u", out JsonElement uEl) && uEl.ValueKind == JsonValueKind.Object)
                         {
                             if (uEl.TryGetProperty("fh", out JsonElement fhEl) && fhEl.TryGetDouble(out double parsedFh))
                                 fh = parsedFh;
@@ -475,9 +521,12 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                                 sd = parsedSd;
                         }
 
-                        if (fh.HasValue || sd.HasValue)
+                        if ((fh.HasValue || sd.HasValue) &&
+                            sampleTime <= DateTimeOffset.UtcNow.AddMinutes(1) &&
+                            DateTimeOffset.UtcNow - sampleTime <= MaxPlanHistoryAge &&
+                            (latest is null || sampleTime > latest.SampleTimeUtc))
                         {
-                            return new PlanHistorySample(sampleTime, fh, sd);
+                            latest = new PlanHistorySample(sampleTime, fh, sd);
                         }
                     }
                 }
@@ -488,7 +537,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
             }
         }
 
-        return null;
+        return latest;
     }
 
     private static SessionDetails TryGetLatestSessionDetails()
@@ -524,18 +573,28 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 try
                 {
                     using var fs = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    // Session logs can grow to hundreds of MB. Only recent events are relevant.
+                    const int tailBytes = 1024 * 1024;
+                    if (fs.Length > tailBytes)
+                    {
+                        fs.Seek(-tailBytes, SeekOrigin.End);
+                    }
                     using var sr = new StreamReader(fs);
+                    if (fs.Position > 0) sr.ReadLine(); // Discard a partial first record.
                     string? line;
+                    string? fileCostLine = null;
+                    string? fileRateLimitLine = null;
+                    string? fileTokensText = null;
                     while ((line = sr.ReadLine()) != null)
                     {
                         if (lastCostLine == null && line.Contains("\"cost-state\"", StringComparison.Ordinal))
                         {
-                            lastCostLine = line;
+                            fileCostLine = line;
                         }
                         if (lastRateLimitLine == null && (line.Contains("\"resetsAt\"", StringComparison.Ordinal) ||
                             line.Contains("\"usage_limit_reached\"", StringComparison.Ordinal)))
                         {
-                            lastRateLimitLine = line;
+                            fileRateLimitLine = line;
                         }
                         if (tokensLeftText == null && line.Contains("total_tokens", StringComparison.Ordinal))
                         {
@@ -549,7 +608,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                                     string[] parts = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                                     if (parts.Length > 0 && long.TryParse(parts[0], out long tokCount))
                                     {
-                                        tokensLeftText = tokCount >= 1_000_000
+                                        fileTokensText = tokCount >= 1_000_000
                                             ? string.Create(CultureInfo.InvariantCulture, $"{(tokCount / 1_000_000.0):0.1}M tok")
                                             : string.Create(CultureInfo.InvariantCulture, $"{tokCount / 1_000}k tok");
                                     }
@@ -557,6 +616,9 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                             }
                         }
                     }
+                    lastCostLine ??= fileCostLine;
+                    lastRateLimitLine ??= fileRateLimitLine;
+                    tokensLeftText ??= fileTokensText;
                 }
                 catch { }
 

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Reflection;
 using System.Threading.Tasks;
 using AIUsageTracker.Helpers;
 using AIUsageTracker.Models;
@@ -223,5 +224,106 @@ public class QuotaTrackerTests
             if (File.Exists(tempCreds)) File.Delete(tempCreds);
         }
     }
+
+    [Theory]
+    [InlineData("{\"five_hour\":{\"utilization\":42.5}}", true)]
+    [InlineData("{\"seven_day\":{\"utilization\":0}}", true)]
+    [InlineData("{\"error\":{\"message\":\"rate limited\"}}", false)]
+    [InlineData("{\"five_hour\":{\"utilization\":null}}", false)]
+    [InlineData("{\"five_hour\":{\"utilization\":101}}", false)]
+    [InlineData("{\"five_hour\":{\"utilization\":\"42\"}}", false)]
+    [InlineData("invalid JSON", false)]
+    public void ClaudeCodeQuotaProvider_OnlyCachesUsableApiResponses(string body, bool expected)
+    {
+        var validator = typeof(ClaudeCodeQuotaProvider).GetMethod(
+            "IsValidUsageApiResponse", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(validator);
+        Assert.Equal(expected, (bool)validator.Invoke(null, new object?[] { body })!);
+    }
+
+    [Fact]
+    public void ClaudeAuthService_MissingOrMalformedAccessTokenNeedsRefresh()
+    {
+        string tempCreds = Path.Combine(Path.GetTempPath(), $"claude_missing_token_{Guid.NewGuid():N}.json");
+        var settings = new AppSettings { CustomClaudeCredentialsPath = tempCreds };
+        try
+        {
+            long future = DateTimeOffset.UtcNow.AddHours(2).ToUnixTimeMilliseconds();
+            File.WriteAllText(tempCreds, $"{{\"claudeAiOauth\":{{\"expiresAt\":{future},\"refreshToken\":\"refresh\"}}}}");
+            Assert.True(ClaudeAuthService.IsTokenExpiringSoonStatic(settings, TimeSpan.FromMinutes(5)));
+
+            File.WriteAllText(tempCreds, $"{{\"claudeAiOauth\":{{\"expiresAt\":{future},\"accessToken\":null}}}}");
+            Assert.True(ClaudeAuthService.IsTokenExpiringSoonStatic(settings, TimeSpan.FromMinutes(5)));
+
+            File.WriteAllText(tempCreds, "{\"claudeAiOauth\":{");
+            Assert.True(ClaudeAuthService.IsTokenExpiringSoonStatic(settings, TimeSpan.FromMinutes(5)));
+        }
+        finally
+        {
+            if (File.Exists(tempCreds)) File.Delete(tempCreds);
+        }
+    }
+
+    [Fact]
+    public void AntigravityQuotaProvider_ParsesGeminiWeeklyCorrectlyWithoutPickingArgon()
+    {
+        string mockSummaryJson = """
+        {
+          "response": {
+            "groups": [
+              {
+                "displayName": "Gemini Models",
+                "description": "Models within this group: Gemini Flash, Gemini Pro",
+                "buckets": [
+                  {
+                    "bucketId": "gemini-weekly",
+                    "displayName": "Weekly Limit Remaining",
+                    "window": "weekly",
+                    "remainingFraction": 0.5524,
+                    "resetTime": "2026-10-24T03:24:10Z"
+                  },
+                  {
+                    "bucketId": "gemini-5h",
+                    "displayName": "Five Hour Limit Remaining",
+                    "window": "5h",
+                    "remainingFraction": 0.98,
+                    "resetTime": "2026-10-18T15:33:14Z"
+                  }
+                ]
+              },
+              {
+                "displayName": "Gemini 4 Argon",
+                "buckets": [
+                  {
+                    "bucketId": "gemini-argon-wtu-weekly",
+                    "displayName": "Gemini 4 Argon Weekly Limit",
+                    "window": "weekly",
+                    "remainingFraction": 0.0,
+                    "resetTime": "2026-10-24T01:43:58Z"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """;
+
+        var settings = new AppSettings
+        {
+            ShowAntigravityFlash = true,
+            ShowAntigravityGeminiWeekly = true
+        };
+
+        var items = AntigravityQuotaProvider.ParseQuotaResponses(null, mockSummaryJson, settings);
+        Assert.NotEmpty(items);
+
+        var weeklyItem = items.FirstOrDefault(x => x.Id == "agy.gemini_weekly");
+        Assert.NotNull(weeklyItem);
+        Assert.Equal("Gemini Models (7d)", weeklyItem.Title);
+        // Must NOT be 100% used / 0% remaining (Argon bucket)
+        Assert.InRange(weeklyItem.UsedPercent, 44.0, 45.0);
+        Assert.InRange(weeklyItem.RemainingPercent, 55.0, 56.0);
+    }
 }
+
 

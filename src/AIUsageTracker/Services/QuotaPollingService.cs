@@ -16,6 +16,9 @@ public sealed class QuotaPollingService : IDisposable
     private readonly IReadOnlyList<IQuotaProvider> _providers;
     private readonly DispatcherTimer _timer;
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    private volatile bool _disposed;
+    private readonly CancellationTokenSource _disposeCancellation = new();
+    private readonly EventHandler? _credentialsChangedHandler;
     private string _lastProviderConfigSignature;
 
     public IReadOnlyList<QuotaItem> LatestItems { get; private set; } = Array.Empty<QuotaItem>();
@@ -41,13 +44,18 @@ public sealed class QuotaPollingService : IDisposable
         {
             Interval = TimeSpan.FromSeconds(Math.Max(10, _settingsService.Current.RefreshIntervalSeconds))
         };
-        _timer.Tick += async (_, _) => await RefreshNowAsync();
+        _timer.Tick += async (_, _) =>
+        {
+            try { await RefreshNowAsync(); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Polling failed: {ex}"); }
+        };
 
         _settingsService.SettingsChanged += OnSettingsChanged;
 
         if (_claudeAuthService != null)
         {
-            _claudeAuthService.CredentialsChanged += async (_, _) => await RefreshNowAsync();
+            _credentialsChangedHandler = (_, _) => QueueRefresh();
+            _claudeAuthService.CredentialsChanged += _credentialsChangedHandler;
         }
     }
 
@@ -55,19 +63,31 @@ public sealed class QuotaPollingService : IDisposable
     {
         _timer.Interval = TimeSpan.FromSeconds(Math.Max(10, _settingsService.Current.RefreshIntervalSeconds));
         _timer.Start();
-        _ = RefreshNowAsync();
+        QueueRefresh();
     }
 
     private void OnSettingsChanged(object? sender, AppSettings newSettings)
     {
+        if (_disposed) return;
+        if (!_timer.Dispatcher.CheckAccess())
+        {
+            _timer.Dispatcher.BeginInvoke(new Action(() => OnSettingsChanged(sender, newSettings)));
+            return;
+        }
         _timer.Interval = TimeSpan.FromSeconds(Math.Max(10, newSettings.RefreshIntervalSeconds));
 
         string newSig = ComputeProviderSignature(newSettings);
         if (newSig != _lastProviderConfigSignature || LatestItems.Count == 0)
         {
             _lastProviderConfigSignature = newSig;
-            _ = RefreshNowAsync();
+            QueueRefresh();
         }
+    }
+
+    private async void QueueRefresh()
+    {
+        try { await RefreshNowAsync(); }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Refresh failed: {ex}"); }
     }
 
     private static string ComputeProviderSignature(AppSettings s)
@@ -77,59 +97,80 @@ public sealed class QuotaPollingService : IDisposable
             s.EnableClaudeCode, s.ShowClaudeSession5h, s.ShowClaudeWeekly7d, s.ShowClaudeOpus,
             s.ShowClaudeSonnet, s.ShowClaudeDedicatedEvenIfEmpty, s.ShowClaudeSessionCostSubtitle, s.CustomClaudeCredentialsPath,
             s.EnableAntigravity, s.GroupAntigravityEffortLevels, s.ShowAntigravityArgon,
-            s.ShowAntigravityFlash, s.ShowAntigravityClaudeOpus, s.ShowAntigravityClaudeSonnet, s.ShowAntigravityGptOss);
+            s.ShowAntigravityFlash, s.ShowAntigravityGeminiWeekly, s.ShowAntigravityClaudeOpus, s.ShowAntigravityClaudeSonnet, s.ShowAntigravityGptOss);
     }
 
     public async Task<IReadOnlyList<QuotaItem>> RefreshNowAsync(CancellationToken cancellationToken = default)
     {
-        if (!await _refreshLock.WaitAsync(0, cancellationToken))
-        {
-            return LatestItems;
-        }
+        if (_disposed) return LatestItems;
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeCancellation.Token);
+        CancellationToken token = linkedCancellation.Token;
+        // Wait for the running refresh, then fetch again with current credentials/settings.
+        await _refreshLock.WaitAsync(token);
 
         try
         {
-            IsRefreshing = true;
-            RefreshStateChanged?.Invoke(this, true);
-
-            AppSettings snapshot = _settingsService.Current;
-
-            if (_claudeAuthService != null && snapshot.EnableClaudeCode)
             {
-                bool isExpired = _claudeAuthService.UpdateTokenExpiredStatus();
-                if (isExpired && snapshot.AutoPromptClaudeLoginOnExpiration)
-                {
+                if (_disposed) return LatestItems;
+                IsRefreshing = true;
+                RefreshStateChanged?.Invoke(this, true);
+                AppSettings snapshot = _settingsService.Current;
+
+                if (_claudeAuthService != null && snapshot.EnableClaudeCode)
+                    _claudeAuthService.UpdateTokenExpiredStatus();
+                Task<IReadOnlyList<QuotaItem>>[] tasks = _providers
+                    .Select(p => Task.Run(() => FetchProviderSafeAsync(p, snapshot, token), token))
+                    .ToArray();
+
+                IReadOnlyList<QuotaItem>[] results = await Task.WhenAll(tasks);
+
+                List<QuotaItem> combined = results
+                    .SelectMany(r => r)
+                    .OrderBy(item => item.SortOrder)
+                    .ToList();
+
+                if (_disposed) return LatestItems;
+                LatestItems = combined;
+                LastUpdated = DateTimeOffset.Now;
+                if (_timer.Dispatcher.CheckAccess())
+                    QuotasUpdated?.Invoke(this, combined);
+                else if (!_timer.Dispatcher.HasShutdownStarted)
+                    await _timer.Dispatcher.InvokeAsync(() => { if (!_disposed) QuotasUpdated?.Invoke(this, combined); });
+                if (_claudeAuthService != null && snapshot.EnableClaudeCode &&
+                    snapshot.AutoPromptClaudeLoginOnExpiration && _claudeAuthService.UpdateTokenExpiredStatus())
                     _claudeAuthService.TryAutoLogin(force: false);
-                }
             }
-            Task<IReadOnlyList<QuotaItem>>[] tasks = _providers
-                .Select(p => p.FetchQuotasAsync(snapshot, cancellationToken))
-                .ToArray();
 
-            IReadOnlyList<QuotaItem>[] results = await Task.WhenAll(tasks);
-
-            List<QuotaItem> combined = results
-                .SelectMany(r => r)
-                .OrderBy(item => item.SortOrder)
-                .ToList();
-
-            LatestItems = combined;
-            LastUpdated = DateTimeOffset.Now;
-            QuotasUpdated?.Invoke(this, combined);
-            return combined;
+            return LatestItems;
         }
         finally
         {
             IsRefreshing = false;
-            RefreshStateChanged?.Invoke(this, false);
+            if (!_disposed) RefreshStateChanged?.Invoke(this, false);
             _refreshLock.Release();
+        }
+    }
+
+    private static async Task<IReadOnlyList<QuotaItem>> FetchProviderSafeAsync(
+        IQuotaProvider provider, AppSettings settings, CancellationToken cancellationToken)
+    {
+        try { return await provider.FetchQuotasAsync(settings, cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"{provider.ProviderType} fetch failed: {ex}");
+            return Array.Empty<QuotaItem>();
         }
     }
 
     public void Dispose()
     {
+        _disposed = true;
+        _disposeCancellation.Cancel();
         _timer.Stop();
         _settingsService.SettingsChanged -= OnSettingsChanged;
-        _refreshLock.Dispose();
+        if (_claudeAuthService != null && _credentialsChangedHandler != null)
+            _claudeAuthService.CredentialsChanged -= _credentialsChangedHandler;
+        // An async refresh may still be releasing the semaphore.
     }
 }

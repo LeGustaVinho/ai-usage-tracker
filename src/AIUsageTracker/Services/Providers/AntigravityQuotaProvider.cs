@@ -22,12 +22,15 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
 
     private const string RequestBodyJson =
         """{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en"}}""";
+    private const string SummaryRequestBodyJson =
+        """{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en","ideVersion":"unknown"}}""";
 
     private CachedEndpoint? _cachedEndpoint;
 
     public QuotaProviderType ProviderType => QuotaProviderType.Antigravity;
 
     private sealed record CachedEndpoint(int ProcessId, string BaseUrl, string CsrfToken);
+    private sealed record QuotaResponses(string? UserStatusJson, string? SummaryJson);
 
     private static HttpClient CreateHttpClient()
     {
@@ -50,13 +53,13 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
 
         try
         {
-            string? responseJson = await QueryLanguageServerAsync(cancellationToken);
-            if (string.IsNullOrWhiteSpace(responseJson))
+            QuotaResponses? responses = await QueryLanguageServerAsync(settings.ShowAntigravityGeminiWeekly, cancellationToken);
+            if (responses == null)
             {
                 return CreateOfflineFallback();
             }
 
-            return ParseUserStatusResponse(responseJson, settings);
+            return ParseQuotaResponses(responses.UserStatusJson, responses.SummaryJson, settings);
         }
         catch (Exception ex)
         {
@@ -64,20 +67,31 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         }
     }
 
-    private async Task<string?> QueryLanguageServerAsync(CancellationToken cancellationToken)
+    private async Task<QuotaResponses?> QueryLanguageServerAsync(bool needsWeeklySummary, CancellationToken cancellationToken)
     {
-        // 1. Try cached endpoint first if process is still alive
+        QuotaResponses? legacyFallback = null;
+
+        // Prefer servers that expose the weekly summary. The IDE-only language_server
+        // usually supports GetUserStatus but not RetrieveUserQuotaSummary.
         if (_cachedEndpoint != null)
         {
-            string? cachedResult = await TryCallGetUserStatusAsync(_cachedEndpoint.BaseUrl, _cachedEndpoint.CsrfToken, cancellationToken);
-            if (!string.IsNullOrWhiteSpace(cachedResult))
+            QuotaResponses? cachedResult = await TryFetchEndpointAsync(_cachedEndpoint.BaseUrl, _cachedEndpoint.CsrfToken, needsWeeklySummary, cancellationToken);
+            if (cachedResult != null)
             {
-                return cachedResult;
+                if (!needsWeeklySummary || HasGeminiWeeklyQuota(cachedResult.SummaryJson))
+                {
+                    return cachedResult;
+                }
+                legacyFallback = cachedResult;
             }
-            _cachedEndpoint = null;
+            else
+            {
+                _cachedEndpoint = null;
+            }
         }
 
-        // 2. Discover running language_server processes
+        // Discover all running language servers so an IDE endpoint cannot hide
+        // a richer Antigravity app endpoint on the same machine.
         Process[] processes = Process.GetProcessesByName("language_server");
         try
         {
@@ -85,6 +99,12 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
             {
                 string? cmdLine = Win32Interop.GetProcessCommandLine(proc.Id);
                 if (string.IsNullOrWhiteSpace(cmdLine))
+                {
+                    continue;
+                }
+
+                // Scheduled-task children can outlive the IDE and expose stale ports.
+                if (cmdLine.Contains("multicall schedule", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -103,11 +123,25 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                     foreach (string scheme in new[] { "http", "https" })
                     {
                         string baseUrl = $"{scheme}://127.0.0.1:{port}";
-                        string? json = await TryCallGetUserStatusAsync(baseUrl, csrfToken, cancellationToken);
-                        if (!string.IsNullOrWhiteSpace(json))
+                        if (_cachedEndpoint?.ProcessId == proc.Id && _cachedEndpoint.BaseUrl == baseUrl)
                         {
-                            _cachedEndpoint = new CachedEndpoint(proc.Id, baseUrl, csrfToken);
-                            return json;
+                            continue;
+                        }
+
+                        QuotaResponses? result = await TryFetchEndpointAsync(baseUrl, csrfToken, needsWeeklySummary, cancellationToken);
+                        if (result != null)
+                        {
+                            if (!needsWeeklySummary || HasGeminiWeeklyQuota(result.SummaryJson))
+                            {
+                                _cachedEndpoint = new CachedEndpoint(proc.Id, baseUrl, csrfToken);
+                                return result;
+                            }
+
+                            if (legacyFallback == null)
+                            {
+                                legacyFallback = result;
+                                _cachedEndpoint = new CachedEndpoint(proc.Id, baseUrl, csrfToken);
+                            }
                         }
                     }
                 }
@@ -121,18 +155,28 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
             }
         }
 
-        return null;
+        return legacyFallback;
     }
 
-    private static async Task<string?> TryCallGetUserStatusAsync(string baseUrl, string csrfToken, CancellationToken cancellationToken)
+    private static async Task<QuotaResponses?> TryFetchEndpointAsync(string baseUrl, string csrfToken, bool needsWeeklySummary, CancellationToken cancellationToken)
+    {
+        string? status = await TryCallRpcAsync(baseUrl, csrfToken, "GetUserStatus", "clientModelConfigs", cancellationToken);
+        string? summary = needsWeeklySummary
+            ? await TryCallRpcAsync(baseUrl, csrfToken, "RetrieveUserQuotaSummary", "\"groups\"", cancellationToken)
+            : null;
+        return status != null || summary != null ? new QuotaResponses(status, summary) : null;
+    }
+
+    private static async Task<string?> TryCallRpcAsync(string baseUrl, string csrfToken, string method, string expectedField, CancellationToken cancellationToken)
     {
         try
         {
-            string url = $"{baseUrl}/exa.language_server_pb.LanguageServerService/GetUserStatus";
+            string url = $"{baseUrl}/exa.language_server_pb.LanguageServerService/{method}";
             using var request = new HttpRequestMessage(HttpMethod.Post, url);
             request.Headers.TryAddWithoutValidation("x-codeium-csrf-token", csrfToken);
             request.Headers.TryAddWithoutValidation("Connect-Protocol-Version", "1");
-            request.Content = new StringContent(RequestBodyJson, Encoding.UTF8, "application/json");
+            string body = method == "RetrieveUserQuotaSummary" ? SummaryRequestBodyJson : RequestBodyJson;
+            request.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
             using HttpResponseMessage response = await Http.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
@@ -141,7 +185,7 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
             }
 
             string content = await response.Content.ReadAsStringAsync(cancellationToken);
-            if (content.Contains("clientModelConfigs", StringComparison.Ordinal))
+            if (content.Contains(expectedField, StringComparison.Ordinal))
             {
                 return content;
             }
@@ -149,6 +193,229 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         catch
         {
             // Ignore port probe error
+        }
+
+        return null;
+    }
+
+    internal static IReadOnlyList<QuotaItem> ParseQuotaResponses(string? statusJson, string? summaryJson, AppSettings settings)
+    {
+        var items = !string.IsNullOrWhiteSpace(statusJson)
+            ? ParseUserStatusResponse(statusJson, settings).ToList()
+            : new List<QuotaItem>();
+
+        if (settings.ShowAntigravityFlash &&
+            !items.Any(x => x.IsAvailable && x.Id.StartsWith("agy.gemini_", StringComparison.Ordinal)))
+        {
+            QuotaItem? session = ParseGeminiSummaryQuota(summaryJson, weekly: false);
+            if (session != null)
+            {
+                items.Add(session);
+            }
+        }
+
+        QuotaItem? weekly = settings.ShowAntigravityGeminiWeekly
+            ? ParseGeminiSummaryQuota(summaryJson, weekly: true) : null;
+        if (weekly != null)
+        {
+            items.Add(weekly);
+        }
+        else if (settings.ShowAntigravityGeminiWeekly &&
+                 items.Any(x => x.IsAvailable && (x.Id.StartsWith("agy.gemini_flash", StringComparison.Ordinal) ||
+                                                  x.Id.StartsWith("agy.gemini_argon", StringComparison.Ordinal))))
+        {
+            items.Add(new QuotaItem
+            {
+                Id = "agy.gemini_weekly",
+                Provider = QuotaProviderType.Antigravity,
+                ProviderBadge = "GEMINI",
+                BadgeColorHex = "#06B6D4",
+                Title = "Gemini Models (7d)",
+                IsAvailable = false,
+                Subtitle = "Servidor local não fornece cota semanal; abra o Antigravity 2.x",
+                SourceDetail = "Requer RetrieveUserQuotaSummary",
+                SortOrder = 32
+            });
+        }
+
+        return items.Count > 0 ? items : CreateOfflineFallback();
+    }
+
+    private static bool HasGeminiWeeklyQuota(string? summaryJson) =>
+        ParseGeminiSummaryQuota(summaryJson, weekly: true) != null;
+
+    private static QuotaItem? ParseGeminiSummaryQuota(string? summaryJson, bool weekly)
+    {
+        if (string.IsNullOrWhiteSpace(summaryJson))
+        {
+            return null;
+        }
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(summaryJson);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        using JsonDocument ownedDocument = document;
+        JsonElement root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (root.TryGetProperty("response", out JsonElement response))
+        {
+            root = response;
+        }
+
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("groups", out JsonElement groups) || groups.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        QuotaItem? mostUsed = null;
+        foreach (JsonElement group in groups.EnumerateArray())
+        {
+            if (group.ValueKind != JsonValueKind.Object ||
+                !group.TryGetProperty("displayName", out JsonElement name) ||
+                name.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            string groupName = name.GetString()!;
+            // Must belong to Gemini Models (Flash / Pro). Exclude Argon which is tracked separately!
+            if (!groupName.Contains("Gemini", StringComparison.OrdinalIgnoreCase) ||
+                groupName.Contains("Argon", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!group.TryGetProperty("buckets", out JsonElement buckets) ||
+                buckets.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (JsonElement bucket in buckets.EnumerateArray())
+            {
+                if (bucket.ValueKind != JsonValueKind.Object || !IsMatchingBucket(bucket, weekly))
+                {
+                    continue;
+                }
+
+                JsonElement remaining = bucket.TryGetProperty("remaining", out JsonElement rem) && rem.ValueKind == JsonValueKind.Object
+                    ? rem : bucket;
+                if ((!remaining.TryGetProperty("remainingFraction", out JsonElement fraction) &&
+                     !bucket.TryGetProperty("remainingFraction", out fraction)) ||
+                    fraction.ValueKind != JsonValueKind.Number ||
+                    !fraction.TryGetDouble(out double value) || !double.IsFinite(value))
+                {
+                    continue;
+                }
+
+                double used = (1.0 - Math.Clamp(value, 0.0, 1.0)) * 100.0;
+                if (mostUsed != null && mostUsed.UsedPercent >= used)
+                {
+                    continue;
+                }
+
+                DateTimeOffset? resetTime = ReadResetTime(bucket) ?? ReadResetTime(remaining);
+                string? description = bucket.TryGetProperty("description", out JsonElement desc) && desc.ValueKind == JsonValueKind.String
+                    ? desc.GetString() : null;
+
+                mostUsed = new QuotaItem
+                {
+                    Id = weekly ? "agy.gemini_weekly" : "agy.gemini_session",
+                    Provider = QuotaProviderType.Antigravity,
+                    ProviderBadge = "GEMINI",
+                    BadgeColorHex = "#06B6D4",
+                    Title = weekly ? "Gemini Models (7d)" : "Gemini Models (5h)",
+                    UsedPercent = used,
+                    ResetTime = resetTime,
+                    Subtitle = string.IsNullOrWhiteSpace(description)
+                        ? (weekly ? "Cota semanal compartilhada (inclui Gemini 3.8 Flash)" : "Cota de 5 horas compartilhada")
+                        : (weekly ? $"Cota semanal compartilhada (Flash / Pro) • {description}" : $"Cota compartilhada • {description}"),
+                    SourceDetail = "Antigravity RetrieveUserQuotaSummary (local)",
+                    IsAvailable = true,
+                    SortOrder = weekly ? 32 : 31
+                };
+            }
+        }
+
+        return mostUsed;
+    }
+
+    private static bool IsMatchingBucket(JsonElement bucket, bool weekly)
+    {
+        // 1. Direct match on bucketId (e.g. "gemini-weekly", "gemini-5h")
+        if (bucket.TryGetProperty("bucketId", out JsonElement bId) && bId.ValueKind == JsonValueKind.String)
+        {
+            string id = bId.GetString() ?? string.Empty;
+            if (weekly && (id.Equals("gemini-weekly", StringComparison.OrdinalIgnoreCase) || id.Contains("weekly", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+            if (!weekly && (id.Equals("gemini-5h", StringComparison.OrdinalIgnoreCase) || id.Contains("5h", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        // 2. Match on window or displayName
+        string cadence = bucket.TryGetProperty("window", out JsonElement window) && window.ValueKind == JsonValueKind.String
+            ? window.GetString() ?? string.Empty : string.Empty;
+        if (string.IsNullOrWhiteSpace(cadence))
+        {
+            foreach (string field in new[] { "bucketId", "displayName" })
+            {
+                if (bucket.TryGetProperty(field, out JsonElement text) && text.ValueKind == JsonValueKind.String)
+                {
+                    cadence += " " + text.GetString();
+                }
+            }
+        }
+
+        bool isWeekly = cadence.Contains("week", StringComparison.OrdinalIgnoreCase) ||
+                        cadence.Contains("7d", StringComparison.OrdinalIgnoreCase) ||
+                        cadence.Contains("7-day", StringComparison.OrdinalIgnoreCase) ||
+                        cadence.Contains("7 day", StringComparison.OrdinalIgnoreCase);
+        bool isSession = cadence.Contains("5h", StringComparison.OrdinalIgnoreCase) ||
+                         cadence.Contains("five hour", StringComparison.OrdinalIgnoreCase) ||
+                         cadence.Contains("five-hour", StringComparison.OrdinalIgnoreCase);
+        return weekly ? isWeekly : isSession;
+    }
+
+    private static DateTimeOffset? ReadResetTime(JsonElement element)
+    {
+        if (!element.TryGetProperty("resetTime", out JsonElement reset))
+        {
+            return null;
+        }
+
+        if (reset.ValueKind == JsonValueKind.String &&
+            DateTimeOffset.TryParse(reset.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset parsed))
+        {
+            return parsed;
+        }
+
+        if (reset.ValueKind == JsonValueKind.Number &&
+            reset.TryGetInt64(out long unixSeconds))
+        {
+            try
+            {
+                return DateTimeOffset.FromUnixTimeSeconds(unixSeconds);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return null;
+            }
         }
 
         return null;
@@ -235,7 +502,7 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                     Provider = QuotaProviderType.Antigravity,
                     ProviderBadge = meta.Badge,
                     BadgeColorHex = meta.ColorHex,
-                    Title = meta.DisplayName,
+                    Title = meta.Id == "agy.gemini_flash" ? $"{meta.DisplayName} (5h)" : meta.DisplayName,
                     UsedPercent = rep.UsedPercent,
                     ResetTime = rep.ResetTime,
                     Subtitle = subtitle,
@@ -262,7 +529,7 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                     Provider = QuotaProviderType.Antigravity,
                     ProviderBadge = meta.Badge,
                     BadgeColorHex = meta.ColorHex,
-                    Title = raw.Label,
+                    Title = meta.Id == "agy.gemini_flash" ? $"{raw.Label} (5h)" : raw.Label,
                     UsedPercent = raw.UsedPercent,
                     ResetTime = raw.ResetTime,
                     Subtitle = "Antigravity IDE Local Server",
@@ -306,20 +573,20 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
             label.Contains("Opus", StringComparison.OrdinalIgnoreCase))
         {
             string baseName = EffortSuffixRegex.Replace(label, "").Trim() + " (AGY)";
-            return new FamilyMetadata("agy.claude_opus", baseName, "AGY", "#A855F7", 32);
+            return new FamilyMetadata("agy.claude_opus", baseName, "AGY", "#A855F7", 33);
         }
 
         if (label.Contains("Claude", StringComparison.OrdinalIgnoreCase) &&
             label.Contains("Sonnet", StringComparison.OrdinalIgnoreCase))
         {
             string baseName = EffortSuffixRegex.Replace(label, "").Trim() + " (AGY)";
-            return new FamilyMetadata("agy.claude_sonnet", baseName, "AGY", "#8B5CF6", 33);
+            return new FamilyMetadata("agy.claude_sonnet", baseName, "AGY", "#8B5CF6", 34);
         }
 
         if (label.Contains("GPT", StringComparison.OrdinalIgnoreCase))
         {
             string baseName = EffortSuffixRegex.Replace(label, "").Trim() + " (AGY)";
-            return new FamilyMetadata("agy.gpt_oss", baseName, "AGY", "#64748B", 34);
+            return new FamilyMetadata("agy.gpt_oss", baseName, "AGY", "#64748B", 35);
         }
 
         string clean = EffortSuffixRegex.Replace(label, "").Trim();

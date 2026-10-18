@@ -445,8 +445,11 @@
                                           Content="Mostrar Gemini 4 Argon"
                                           IsChecked="{Binding Draft.ShowAntigravityArgon}" />
                                 <CheckBox Margin="18,4,0,4"
-                                          Content="Mostrar Gemini 3.8 Flash"
+                                          Content="Mostrar Gemini 3.8 Flash (5h)"
                                           IsChecked="{Binding Draft.ShowAntigravityFlash}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Gemini 3.8 Flash (7d) / Cota Semanal"
+                                          IsChecked="{Binding Draft.ShowAntigravityGeminiWeekly}" />
                                 <CheckBox Margin="18,4,0,4"
                                           Content="Mostrar Claude Opus 5.5 (Cota do Antigravity)"
                                           IsChecked="{Binding Draft.ShowAntigravityClaudeOpus}" />
