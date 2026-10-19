@@ -16,6 +16,9 @@ public sealed class QuotaPollingService : IDisposable
     private readonly IReadOnlyList<IQuotaProvider> _providers;
     private readonly DispatcherTimer _timer;
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    private readonly object _queuedRefreshLock = new();
+    private bool _queuedRefreshRunning;
+    private bool _queuedRefreshPending;
     private volatile bool _disposed;
     private readonly CancellationTokenSource _disposeCancellation = new();
     private readonly EventHandler? _credentialsChangedHandler;
@@ -36,7 +39,7 @@ public sealed class QuotaPollingService : IDisposable
         _providers = new IQuotaProvider[]
         {
             new CodexQuotaProvider(),
-            new ClaudeCodeQuotaProvider(),
+            new ClaudeCodeQuotaProvider(_claudeAuthService),
             new AntigravityQuotaProvider()
         };
 
@@ -44,17 +47,13 @@ public sealed class QuotaPollingService : IDisposable
         {
             Interval = TimeSpan.FromSeconds(Math.Max(10, _settingsService.Current.RefreshIntervalSeconds))
         };
-        _timer.Tick += async (_, _) =>
-        {
-            try { await RefreshNowAsync(); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Polling failed: {ex}"); }
-        };
+        _timer.Tick += (_, _) => RequestRefresh();
 
         _settingsService.SettingsChanged += OnSettingsChanged;
 
         if (_claudeAuthService != null)
         {
-            _credentialsChangedHandler = (_, _) => QueueRefresh();
+            _credentialsChangedHandler = (_, _) => RequestRefresh();
             _claudeAuthService.CredentialsChanged += _credentialsChangedHandler;
         }
     }
@@ -63,7 +62,7 @@ public sealed class QuotaPollingService : IDisposable
     {
         _timer.Interval = TimeSpan.FromSeconds(Math.Max(10, _settingsService.Current.RefreshIntervalSeconds));
         _timer.Start();
-        QueueRefresh();
+        RequestRefresh();
     }
 
     private void OnSettingsChanged(object? sender, AppSettings newSettings)
@@ -80,14 +79,44 @@ public sealed class QuotaPollingService : IDisposable
         if (newSig != _lastProviderConfigSignature || LatestItems.Count == 0)
         {
             _lastProviderConfigSignature = newSig;
-            QueueRefresh();
+            RequestRefresh();
         }
     }
 
-    private async void QueueRefresh()
+    public void RequestRefresh()
     {
-        try { await RefreshNowAsync(); }
-        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Refresh failed: {ex}"); }
+        lock (_queuedRefreshLock)
+        {
+            if (_disposed) return;
+            if (_queuedRefreshRunning)
+            {
+                _queuedRefreshPending = true;
+                return;
+            }
+            _queuedRefreshRunning = true;
+        }
+        _ = RunQueuedRefreshesAsync();
+    }
+
+    private async Task RunQueuedRefreshesAsync()
+    {
+        while (true)
+        {
+            try { await RefreshNowAsync(); }
+            catch (OperationCanceledException) when (_disposed) { }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Refresh failed: {ex}"); }
+
+            lock (_queuedRefreshLock)
+            {
+                if (_disposed || !_queuedRefreshPending)
+                {
+                    _queuedRefreshRunning = false;
+                    _queuedRefreshPending = false;
+                    return;
+                }
+                _queuedRefreshPending = false;
+            }
+        }
     }
 
     private static string ComputeProviderSignature(AppSettings s)

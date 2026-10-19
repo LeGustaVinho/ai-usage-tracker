@@ -6,6 +6,8 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,14 +27,17 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
     private static readonly TimeSpan MaxPlanHistoryAge = TimeSpan.FromMinutes(10);
 
     private readonly string _cacheFilePath;
-    private DateTimeOffset _nextAllowedApiCallUtc = DateTimeOffset.MinValue;
+    private readonly ClaudeAuthService? _authService;
+    private long _nextAllowedApiCallTick;
     private string? _lastValidApiJson;
     private DateTimeOffset _lastValidApiTimeUtc;
+    private string? _cachedCredentialSignature;
 
     public QuotaProviderType ProviderType => QuotaProviderType.ClaudeCode;
 
-    public ClaudeCodeQuotaProvider()
+    public ClaudeCodeQuotaProvider(ClaudeAuthService? authService = null)
     {
+        _authService = authService;
         string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         string dir = Path.Combine(appData, "AIUsageTracker");
         Directory.CreateDirectory(dir);
@@ -42,13 +47,22 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         {
             try
             {
-                if (DateTimeOffset.UtcNow - File.GetLastWriteTimeUtc(_cacheFilePath) <= MaxCachedApiAge)
+                TimeSpan cacheAge = DateTimeOffset.UtcNow - File.GetLastWriteTimeUtc(_cacheFilePath);
+                if (cacheAge >= TimeSpan.Zero && cacheAge <= MaxCachedApiAge)
                 {
-                    string candidate = File.ReadAllText(_cacheFilePath);
-                    if (IsValidUsageApiResponse(candidate))
+                    using JsonDocument cachedDocument = JsonDocument.Parse(File.ReadAllText(_cacheFilePath));
+                    JsonElement root = cachedDocument.RootElement;
+                    if (root.TryGetProperty("credentialSignature", out JsonElement signatureElement) &&
+                        signatureElement.ValueKind == JsonValueKind.String &&
+                        root.TryGetProperty("usage", out JsonElement usageElement))
                     {
-                        _lastValidApiJson = candidate;
-                        _lastValidApiTimeUtc = File.GetLastWriteTimeUtc(_cacheFilePath);
+                        string candidate = usageElement.GetRawText();
+                        if (IsValidUsageApiResponse(candidate))
+                        {
+                            _cachedCredentialSignature = signatureElement.GetString();
+                            _lastValidApiJson = candidate;
+                            _lastValidApiTimeUtc = File.GetLastWriteTimeUtc(_cacheFilePath);
+                        }
                     }
                 }
             }
@@ -65,6 +79,8 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         {
             return Array.Empty<QuotaItem>();
         }
+
+        InvalidateCacheIfCredentialsChanged(settings);
 
         // 1. Inspect recent local session logs for session cost, active model, and rate limit events (resetsAt)
         var sessionDetails = TryGetLatestSessionDetails();
@@ -83,15 +99,18 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 if (ClaudeAuthService.IsTokenExpiringSoonStatic(settings, TimeSpan.FromMinutes(5)))
                 {
                     await ClaudeAuthService.TrySilentTokenRefreshAsync(settings, cancellationToken);
+                    InvalidateCacheIfCredentialsChanged(settings);
                 }
 
+                string? requestSignature = GetCredentialSignature(settings);
                 var apiResult = await TryCallOAuthApiAsync(settings, cancellationToken);
-                if (apiResult.Success && IsValidUsageApiResponse(apiResult.Body))
+                if (apiResult.Success && requestSignature != null &&
+                    requestSignature == GetCredentialSignature(settings) && IsValidUsageApiResponse(apiResult.Body))
                 {
                     apiBody = apiResult.Body;
                     _lastValidApiJson = apiBody;
                     _lastValidApiTimeUtc = DateTimeOffset.UtcNow;
-                    _nextAllowedApiCallUtc = DateTimeOffset.UtcNow.Add(MinApiPollInterval);
+                    SetNextApiCall(MinApiPollInterval);
                     SaveCacheToDisk(apiBody!);
                 }
                 else if (apiResult.StatusCode == HttpStatusCode.Unauthorized)
@@ -100,20 +119,31 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                     bool refreshed = await ClaudeAuthService.TrySilentTokenRefreshAsync(settings, cancellationToken);
                     if (refreshed)
                     {
+                        InvalidateCacheIfCredentialsChanged(settings);
+                        requestSignature = GetCredentialSignature(settings);
                         var retryResult = await TryCallOAuthApiAsync(settings, cancellationToken);
-                        if (retryResult.Success && IsValidUsageApiResponse(retryResult.Body))
+                        if (retryResult.Success && requestSignature != null &&
+                            requestSignature == GetCredentialSignature(settings) && IsValidUsageApiResponse(retryResult.Body))
                         {
                             apiBody = retryResult.Body;
                             _lastValidApiJson = apiBody;
                             _lastValidApiTimeUtc = DateTimeOffset.UtcNow;
-                            _nextAllowedApiCallUtc = DateTimeOffset.UtcNow.Add(MinApiPollInterval);
+                            SetNextApiCall(MinApiPollInterval);
                             SaveCacheToDisk(apiBody!);
                         }
+                        else if (retryResult.StatusCode == HttpStatusCode.Unauthorized)
+                        {
+                            _authService?.MarkTokenRejected();
+                        }
+                    }
+                    else
+                    {
+                        _authService?.MarkTokenRejected();
                     }
                 }
                 else if (apiResult.StatusCode == HttpStatusCode.TooManyRequests)
                 {
-                    _nextAllowedApiCallUtc = DateTimeOffset.UtcNow.Add(apiResult.RetryAfter ?? TimeSpan.FromMinutes(2));
+                    SetNextApiCall(apiResult.RetryAfter ?? TimeSpan.FromMinutes(2));
                 }
             }
             catch
@@ -122,10 +152,11 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
             }
         }
 
-        bool isTokenExpired = ClaudeAuthService.IsTokenExpiredStatic(settings);
+        bool isTokenExpired = _authService?.CheckTokenExpired() ?? ClaudeAuthService.IsTokenExpiredStatic(settings);
 
         // 4. Synthesize the most accurate, real-time quota items (using apiBody or cached API)
-        string? recentCachedApi = DateTimeOffset.UtcNow - _lastValidApiTimeUtc <= MaxCachedApiAge
+        TimeSpan age = DateTimeOffset.UtcNow - _lastValidApiTimeUtc;
+        string? recentCachedApi = age >= TimeSpan.Zero && age <= MaxCachedApiAge
             ? _lastValidApiJson : null;
         var items = SynthesizeQuotas(settings, planHistory, sessionDetails, apiBody ?? recentCachedApi, isTokenExpired);
         if (items.Count > 0)
@@ -158,7 +189,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
 
     private bool ShouldAttemptApiCall(AppSettings settings)
     {
-        if (DateTimeOffset.UtcNow < _nextAllowedApiCallUtc)
+        if (Environment.TickCount64 < _nextAllowedApiCallTick)
         {
             return false;
         }
@@ -188,6 +219,41 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         return false;
     }
 
+    private void InvalidateCacheIfCredentialsChanged(AppSettings settings)
+    {
+        string? signature = GetCredentialSignature(settings);
+        if (signature == _cachedCredentialSignature) return;
+
+        _cachedCredentialSignature = signature;
+        _lastValidApiJson = null;
+        _lastValidApiTimeUtc = DateTimeOffset.MinValue;
+        _nextAllowedApiCallTick = 0;
+    }
+
+    private void SetNextApiCall(TimeSpan wait)
+    {
+        // Monotonic elapsed time avoids a Windows clock adjustment freezing polling.
+        long delayMs = (long)Math.Clamp(wait.TotalMilliseconds, 0, TimeSpan.FromMinutes(30).TotalMilliseconds);
+        _nextAllowedApiCallTick = Environment.TickCount64 + delayMs;
+    }
+
+    private static string? GetCredentialSignature(AppSettings settings)
+    {
+        try
+        {
+            string path = Path.GetFullPath(settings.GetEffectiveClaudeCredentialsPath());
+            string json = File.ReadAllText(path);
+            using JsonDocument doc = JsonDocument.Parse(json);
+            JsonElement oauth = doc.RootElement.GetProperty("claudeAiOauth");
+            string? accessToken = oauth.GetProperty("accessToken").GetString();
+            if (string.IsNullOrWhiteSpace(accessToken)) return null;
+
+            byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(path + "\n" + accessToken));
+            return Convert.ToHexString(bytes);
+        }
+        catch { return null; }
+    }
+
     private static bool IsValidUsageApiResponse(string? json)
     {
         if (string.IsNullOrWhiteSpace(json)) return false;
@@ -199,20 +265,32 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
 
             foreach (string key in new[] { "five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet" })
             {
-                if (doc.RootElement.TryGetProperty(key, out JsonElement window) &&
-                    window.ValueKind == JsonValueKind.Object &&
-                    window.TryGetProperty("utilization", out JsonElement utilization) &&
-                    utilization.ValueKind == JsonValueKind.Number &&
-                    utilization.TryGetDouble(out double value) && double.IsFinite(value) &&
-                    value >= 0 && value <= 100)
-                {
-                    return true;
-                }
+                if (TryReadUsageWindow(doc.RootElement, key, out _, out _)) return true;
             }
         }
         catch (JsonException) { }
 
         return false;
+    }
+
+    private static bool TryReadUsageWindow(JsonElement root, string key, out double usedPercent, out DateTimeOffset? reset)
+    {
+        usedPercent = 0;
+        reset = null;
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty(key, out JsonElement window) || window.ValueKind != JsonValueKind.Object ||
+            !window.TryGetProperty("utilization", out JsonElement utilization) || utilization.ValueKind != JsonValueKind.Number ||
+            !utilization.TryGetDouble(out double value) || !double.IsFinite(value) || value < 0 || value > 100)
+            return false;
+
+        usedPercent = value;
+        if (window.TryGetProperty("resets_at", out JsonElement resetElement) &&
+            resetElement.ValueKind == JsonValueKind.String &&
+            DateTimeOffset.TryParse(resetElement.GetString(), CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal, out DateTimeOffset parsed))
+            reset = parsed;
+
+        return true;
     }
 
     private static async Task<(bool Success, HttpStatusCode? StatusCode, TimeSpan? RetryAfter, string? Body)> TryCallOAuthApiAsync(
@@ -237,6 +315,8 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         if (response.StatusCode == HttpStatusCode.TooManyRequests)
         {
             TimeSpan? retry = response.Headers.RetryAfter?.Delta;
+            if (retry == null && response.Headers.RetryAfter?.Date is DateTimeOffset retryDate)
+                retry = retryDate - DateTimeOffset.UtcNow;
             return (false, HttpStatusCode.TooManyRequests, retry, null);
         }
 
@@ -249,7 +329,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         return (true, HttpStatusCode.OK, null, body);
     }
 
-    private static List<QuotaItem> SynthesizeQuotas(
+    internal static List<QuotaItem> SynthesizeQuotas(
         AppSettings settings,
         PlanHistorySample? planHistory,
         SessionDetails sessionDetails,
@@ -278,7 +358,9 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
             double fiveHourUsed = 0.0;
             DateTimeOffset? fiveHourReset = null;
             string source = "Claude Desktop / Code Local State";
-            string subtitle = sessionDetails.Subtitle ?? "Janela de sessão de 5 horas";
+            string subtitle = settings.ShowClaudeSessionCostSubtitle
+                ? sessionDetails.Subtitle ?? "Janela de sessão de 5 horas"
+                : "Janela de sessão de 5 horas";
 
             if (isTokenExpired)
             {
@@ -288,16 +370,13 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
             }
 
             // Priority 1: Recent Anthropic OAuth API
-            if (hasApiRoot && apiRoot.TryGetProperty("five_hour", out JsonElement fhEl) && fhEl.ValueKind == JsonValueKind.Object)
+            double parsedFiveHour = 0;
+            DateTimeOffset? parsedFiveHourReset = null;
+            bool hasFiveHour = hasApiRoot && TryReadUsageWindow(apiRoot, "five_hour", out parsedFiveHour, out parsedFiveHourReset);
+            if (hasFiveHour)
             {
-                fiveHourUsed = fhEl.TryGetProperty("utilization", out JsonElement uEl) && uEl.TryGetDouble(out double u) ? u : 0.0;
-                if (fhEl.TryGetProperty("resets_at", out JsonElement rEl) && DateTimeOffset.TryParse(rEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset r))
-                {
-                    if (r > DateTimeOffset.UtcNow)
-                    {
-                        fiveHourReset = r;
-                    }
-                }
+                fiveHourUsed = parsedFiveHour;
+                if (parsedFiveHourReset > DateTimeOffset.UtcNow) fiveHourReset = parsedFiveHourReset;
                 source = "Anthropic OAuth API";
 
                 if (fiveHourUsed >= 100.0 || (sessionDetails.ActiveRateLimitReset.HasValue && sessionDetails.ActiveRateLimitReset.Value > DateTimeOffset.UtcNow))
@@ -345,8 +424,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 ResetTime = fiveHourReset,
                 Subtitle = subtitle,
                 SourceDetail = source,
-                IsAvailable = (hasApiRoot && apiRoot.TryGetProperty("five_hour", out JsonElement fiveHourWindow) &&
-                    fiveHourWindow.ValueKind == JsonValueKind.Object && fiveHourWindow.TryGetProperty("utilization", out _)) ||
+                IsAvailable = hasFiveHour ||
                     (planHistory?.FiveHourUsedPercent.HasValue ?? false) ||
                     (sessionDetails.ActiveRateLimitReset > DateTimeOffset.UtcNow),
                 SortOrder = 20
@@ -361,16 +439,13 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
             string source = "Claude Desktop / Code Local State";
 
             // Priority 1: Live / cached Anthropic OAuth API
-            if (hasApiRoot && apiRoot.TryGetProperty("seven_day", out JsonElement sdEl) && sdEl.ValueKind == JsonValueKind.Object)
+            double parsedSevenDay = 0;
+            DateTimeOffset? parsedSevenDayReset = null;
+            bool hasSevenDay = hasApiRoot && TryReadUsageWindow(apiRoot, "seven_day", out parsedSevenDay, out parsedSevenDayReset);
+            if (hasSevenDay)
             {
-                sevenDayUsed = sdEl.TryGetProperty("utilization", out JsonElement uEl) && uEl.TryGetDouble(out double u) ? u : 0.0;
-                if (sdEl.TryGetProperty("resets_at", out JsonElement rEl) && DateTimeOffset.TryParse(rEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset r))
-                {
-                    if (r > DateTimeOffset.UtcNow)
-                    {
-                        sevenDayReset = r;
-                    }
-                }
+                sevenDayUsed = parsedSevenDay;
+                if (parsedSevenDayReset > DateTimeOffset.UtcNow) sevenDayReset = parsedSevenDayReset;
                 source = "Anthropic OAuth API";
             }
             // Priority 2: Claude Desktop plan history
@@ -395,8 +470,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 ResetTime = sevenDayReset,
                 Subtitle = weeklySubtitle,
                 SourceDetail = source,
-                IsAvailable = (hasApiRoot && apiRoot.TryGetProperty("seven_day", out JsonElement sevenDayWindow) &&
-                    sevenDayWindow.ValueKind == JsonValueKind.Object && sevenDayWindow.TryGetProperty("utilization", out _)) ||
+                IsAvailable = hasSevenDay ||
                     (planHistory?.SevenDayUsedPercent.HasValue ?? false),
                 SortOrder = 21
             });
@@ -405,13 +479,8 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         // --- 3. Dedicated Opus / Sonnet (if available from API or settings) ---
         if (hasApiRoot)
         {
-            if (settings.ShowClaudeOpus && apiRoot.TryGetProperty("seven_day_opus", out JsonElement opusEl) && opusEl.ValueKind == JsonValueKind.Object)
+            if (settings.ShowClaudeOpus && TryReadUsageWindow(apiRoot, "seven_day_opus", out double opusUsed, out DateTimeOffset? opusReset))
             {
-                double u = opusEl.TryGetProperty("utilization", out JsonElement uEl) && uEl.TryGetDouble(out double v) ? v : 0.0;
-                DateTimeOffset? r = null;
-                if (opusEl.TryGetProperty("resets_at", out JsonElement rEl) && DateTimeOffset.TryParse(rEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset parsed))
-                    r = parsed;
-
                 items.Add(new QuotaItem
                 {
                     Id = "claude.opus",
@@ -419,8 +488,8 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                     ProviderBadge = "CLAUDE",
                     BadgeColorHex = "#D97757",
                     Title = "Claude Opus (7d)",
-                    UsedPercent = Math.Clamp(u, 0.0, 100.0),
-                    ResetTime = r,
+                    UsedPercent = opusUsed,
+                    ResetTime = opusReset,
                     Subtitle = "Cota semanal dedicada Opus",
                     SourceDetail = "Anthropic OAuth API",
                     IsAvailable = true,
@@ -428,13 +497,8 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 });
             }
 
-            if (settings.ShowClaudeSonnet && apiRoot.TryGetProperty("seven_day_sonnet", out JsonElement sonnetEl) && sonnetEl.ValueKind == JsonValueKind.Object)
+            if (settings.ShowClaudeSonnet && TryReadUsageWindow(apiRoot, "seven_day_sonnet", out double sonnetUsed, out DateTimeOffset? sonnetReset))
             {
-                double u = sonnetEl.TryGetProperty("utilization", out JsonElement uEl) && uEl.TryGetDouble(out double v) ? v : 0.0;
-                DateTimeOffset? r = null;
-                if (sonnetEl.TryGetProperty("resets_at", out JsonElement rEl) && DateTimeOffset.TryParse(rEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset parsed))
-                    r = parsed;
-
                 items.Add(new QuotaItem
                 {
                     Id = "claude.sonnet",
@@ -442,8 +506,8 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                     ProviderBadge = "CLAUDE",
                     BadgeColorHex = "#D97757",
                     Title = "Claude Sonnet (7d)",
-                    UsedPercent = Math.Clamp(u, 0.0, 100.0),
-                    ResetTime = r,
+                    UsedPercent = sonnetUsed,
+                    ResetTime = sonnetReset,
                     Subtitle = "Cota semanal dedicada Sonnet",
                     SourceDetail = "Anthropic OAuth API",
                     IsAvailable = true,
@@ -452,14 +516,43 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
             }
         }
 
+        if (settings.ShowClaudeDedicatedEvenIfEmpty)
+        {
+            if (settings.ShowClaudeOpus && !items.Any(item => item.Id == "claude.opus"))
+                items.Add(CreateUnavailableDedicatedQuota("claude.opus", "Claude Opus (7d)", 22));
+            if (settings.ShowClaudeSonnet && !items.Any(item => item.Id == "claude.sonnet"))
+                items.Add(CreateUnavailableDedicatedQuota("claude.sonnet", "Claude Sonnet (7d)", 23));
+        }
+
         return items;
     }
+
+    private static QuotaItem CreateUnavailableDedicatedQuota(string id, string title, int order) => new()
+    {
+        Id = id,
+        Provider = QuotaProviderType.ClaudeCode,
+        ProviderBadge = "CLAUDE",
+        BadgeColorHex = "#D97757",
+        Title = title,
+        IsAvailable = false,
+        UsedPercent = 0,
+        Subtitle = "Sem dados recentes desta cota",
+        SourceDetail = "Anthropic OAuth API (indisponível)",
+        SortOrder = order
+    };
 
     private void SaveCacheToDisk(string json)
     {
         try
         {
-            File.WriteAllText(_cacheFilePath, json);
+            if (_cachedCredentialSignature == null) return;
+            using JsonDocument doc = JsonDocument.Parse(json);
+            string cache = JsonSerializer.Serialize(new
+            {
+                credentialSignature = _cachedCredentialSignature,
+                usage = doc.RootElement
+            });
+            File.WriteAllText(_cacheFilePath, cache);
         }
         catch
         {
@@ -515,9 +608,11 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
 
                         if (s.TryGetProperty("u", out JsonElement uEl) && uEl.ValueKind == JsonValueKind.Object)
                         {
-                            if (uEl.TryGetProperty("fh", out JsonElement fhEl) && fhEl.TryGetDouble(out double parsedFh))
+                            if (uEl.TryGetProperty("fh", out JsonElement fhEl) && fhEl.ValueKind == JsonValueKind.Number &&
+                                fhEl.TryGetDouble(out double parsedFh) && double.IsFinite(parsedFh) && parsedFh >= 0 && parsedFh <= 100)
                                 fh = parsedFh;
-                            if (uEl.TryGetProperty("sd", out JsonElement sdEl) && sdEl.TryGetDouble(out double parsedSd))
+                            if (uEl.TryGetProperty("sd", out JsonElement sdEl) && sdEl.ValueKind == JsonValueKind.Number &&
+                                sdEl.TryGetDouble(out double parsedSd) && double.IsFinite(parsedSd) && parsedSd >= 0 && parsedSd <= 100)
                                 sd = parsedSd;
                         }
 
@@ -718,6 +813,6 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         return rawModel;
     }
 
-    private sealed record PlanHistorySample(DateTimeOffset SampleTimeUtc, double? FiveHourUsedPercent, double? SevenDayUsedPercent);
-    private sealed record SessionDetails(string? Subtitle, DateTimeOffset? ActiveRateLimitReset, string? ModelName);
+    internal sealed record PlanHistorySample(DateTimeOffset SampleTimeUtc, double? FiveHourUsedPercent, double? SevenDayUsedPercent);
+    internal sealed record SessionDetails(string? Subtitle, DateTimeOffset? ActiveRateLimitReset, string? ModelName);
 }

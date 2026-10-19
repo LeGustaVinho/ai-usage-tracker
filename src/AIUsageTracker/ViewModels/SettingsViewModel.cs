@@ -80,7 +80,7 @@ public sealed class SettingsViewModel : ObservableObject
         _draft = _settingsService.Current.Clone();
 
         TestNotificationCommand = new RelayCommand(() => _testNotificationAction?.Invoke());
-        ReconnectClaudeCommand = new RelayCommand(() => ClaudeAuthService.LaunchInteractiveLogin());
+        ReconnectClaudeCommand = new RelayCommand(() => ClaudeAuthService.LaunchInteractiveLogin(Draft));
         ApplyCommand = new RelayCommand(Apply);
         SaveCommand = new RelayCommand(() =>
         {

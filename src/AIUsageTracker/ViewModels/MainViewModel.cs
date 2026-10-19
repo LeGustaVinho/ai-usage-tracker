@@ -80,7 +80,7 @@ public sealed class MainViewModel : ObservableObject
         _openSettingsAction = openSettingsAction;
         _claudeAuthService = claudeAuthService;
 
-        RefreshCommand = new RelayCommand(() => _ = _pollingService.RefreshNowAsync());
+        RefreshCommand = new RelayCommand(_pollingService.RequestRefresh);
         ToggleDisplayModeCommand = new RelayCommand(ToggleDisplayMode);
         ToggleCompactModeCommand = new RelayCommand(ToggleCompactMode);
         ToggleClickThroughCommand = new RelayCommand(ToggleClickThrough);
@@ -94,7 +94,7 @@ public sealed class MainViewModel : ObservableObject
             }
             else
             {
-                ClaudeAuthService.LaunchInteractiveLogin();
+                ClaudeAuthService.LaunchInteractiveLogin(_settingsService.Current);
             }
         });
 

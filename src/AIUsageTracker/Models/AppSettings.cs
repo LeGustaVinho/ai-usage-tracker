@@ -91,6 +91,10 @@ public sealed class AppSettings
         {
             return Environment.ExpandEnvironmentVariables(CustomClaudeCredentialsPath);
         }
+        string? configDir = Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR");
+        if (!string.IsNullOrWhiteSpace(configDir))
+            return Path.Combine(Environment.ExpandEnvironmentVariables(configDir), ".credentials.json");
+
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", ".credentials.json");
     }
 

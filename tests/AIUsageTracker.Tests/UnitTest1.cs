@@ -242,6 +242,42 @@ public class QuotaTrackerTests
     }
 
     [Fact]
+    public void ClaudeCodeQuotaProvider_UsesValidWindowsWhenOtherApiWindowsAreMalformed()
+    {
+        const string payload = """
+            { "five_hour": { "utilization": 32.5, "resets_at": null },
+              "seven_day": { "utilization": "broken" },
+              "seven_day_opus": { "utilization": null },
+              "seven_day_sonnet": { "utilization": 65, "resets_at": 123 } }
+            """;
+
+        var items = ClaudeCodeQuotaProvider.SynthesizeQuotas(
+            new AppSettings(), null, new ClaudeCodeQuotaProvider.SessionDetails(null, null, null), payload, false);
+
+        Assert.Equal(3, items.Count); // Two basic windows and the valid Sonnet window.
+        Assert.Equal(32.5, Assert.Single(items, x => x.Id == "claude.session").UsedPercent);
+        Assert.True(Assert.Single(items, x => x.Id == "claude.session").IsAvailable);
+        Assert.False(Assert.Single(items, x => x.Id == "claude.weekly").IsAvailable);
+        Assert.DoesNotContain(items, x => x.Id == "claude.opus");
+        Assert.Equal(65, Assert.Single(items, x => x.Id == "claude.sonnet").UsedPercent);
+        Assert.Null(Assert.Single(items, x => x.Id == "claude.sonnet").ResetTime);
+    }
+
+    [Fact]
+    public void ClaudeCodeQuotaProvider_ShowsUnavailableDedicatedQuotasWhenRequested()
+    {
+        var settings = new AppSettings { ShowClaudeDedicatedEvenIfEmpty = true };
+        var items = ClaudeCodeQuotaProvider.SynthesizeQuotas(
+            settings, null, new ClaudeCodeQuotaProvider.SessionDetails(null, null, null),
+            "{\"five_hour\":{\"utilization\":55}}", false);
+
+        Assert.Equal(4, items.Count);
+        Assert.False(Assert.Single(items, x => x.Id == "claude.opus").IsAvailable);
+        Assert.False(Assert.Single(items, x => x.Id == "claude.sonnet").IsAvailable);
+        Assert.Equal(55, Assert.Single(items, x => x.Id == "claude.session").UsedPercent);
+    }
+
+    [Fact]
     public void ClaudeAuthService_MissingOrMalformedAccessTokenNeedsRefresh()
     {
         string tempCreds = Path.Combine(Path.GetTempPath(), $"claude_missing_token_{Guid.NewGuid():N}.json");
@@ -262,6 +298,30 @@ public class QuotaTrackerTests
         {
             if (File.Exists(tempCreds)) File.Delete(tempCreds);
         }
+    }
+
+    [Fact]
+    public void ClaudeAuthService_RevokedTokenIsExpiredEvenWithFutureExpiry()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), $"claude_revoked_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        string creds = Path.Combine(tempDir, ".credentials.json");
+        try
+        {
+            long expiry = DateTimeOffset.UtcNow.AddHours(8).ToUnixTimeMilliseconds();
+            File.WriteAllText(creds, $"{{\"claudeAiOauth\":{{\"accessToken\":\"valid-format\",\"expiresAt\":{expiry}}}}}");
+            var settings = new SettingsService(Path.Combine(tempDir, "settings.json"));
+            var newSettings = settings.Current.Clone();
+            newSettings.CustomClaudeCredentialsPath = creds;
+            settings.Update(newSettings);
+            using var auth = new ClaudeAuthService(settings);
+
+            Assert.False(auth.UpdateTokenExpiredStatus());
+            auth.MarkTokenRejected();
+            Assert.True(auth.UpdateTokenExpiredStatus());
+            Assert.True(auth.IsExpired);
+        }
+        finally { Directory.Delete(tempDir, recursive: true); }
     }
 
     [Fact]

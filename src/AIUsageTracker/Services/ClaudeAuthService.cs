@@ -21,11 +21,13 @@ public sealed class ClaudeAuthService : IDisposable
 
     private readonly SettingsService _settingsService;
     private FileSystemWatcher? _watcher;
+    private string? _watchedCredentialsPath;
     private DateTimeOffset _lastAutoLoginAttemptUtc = DateTimeOffset.MinValue;
     private readonly object _loginLock = new();
     private readonly EventHandler<AppSettings> _settingsChangedHandler;
     private readonly SemaphoreSlim _autoLoginGate = new(1, 1);
     private bool _disposed;
+    private volatile bool _authenticationRejected;
 
     public event EventHandler? CredentialsChanged;
     public event EventHandler<bool>? TokenExpiredStateChanged;
@@ -44,12 +46,17 @@ public sealed class ClaudeAuthService : IDisposable
     private void SetupWatcher()
     {
         if (_disposed) return;
+        string credPath = _settingsService.Current.GetEffectiveClaudeCredentialsPath();
+        if (_watcher != null && string.Equals(_watchedCredentialsPath, credPath, StringComparison.OrdinalIgnoreCase))
+            return;
+        if (!string.Equals(_watchedCredentialsPath, credPath, StringComparison.OrdinalIgnoreCase))
+            _authenticationRejected = false;
+        _watchedCredentialsPath = credPath;
         _watcher?.Dispose();
         _watcher = null;
 
         try
         {
-            string credPath = _settingsService.Current.GetEffectiveClaudeCredentialsPath();
             string? dir = Path.GetDirectoryName(credPath);
             string fileName = Path.GetFileName(credPath);
 
@@ -64,6 +71,8 @@ public sealed class ClaudeAuthService : IDisposable
                 _watcher.Changed += OnFileChanged;
                 _watcher.Created += OnFileChanged;
                 _watcher.Renamed += OnFileChanged;
+                _watcher.Deleted += OnFileChanged;
+                _watcher.Error += OnWatcherError;
             }
         }
         catch
@@ -74,18 +83,32 @@ public sealed class ClaudeAuthService : IDisposable
 
     private void OnFileChanged(object sender, FileSystemEventArgs e)
     {
-        if (_disposed) return;
+        if (_disposed || !ReferenceEquals(sender, _watcher)) return;
+        _authenticationRejected = false;
         UpdateTokenExpiredStatus();
         CredentialsChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    private void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        if (_disposed || !ReferenceEquals(sender, _watcher)) return;
+        _watcher?.Dispose();
+        _watcher = null;
+        SetupWatcher();
+    }
+
+    // A revoked OAuth token can return HTTP 401 long before its expiresAt timestamp.
+    // The polling service publishes the new state after provider requests finish.
+    public void MarkTokenRejected() => _authenticationRejected = true;
+
     public bool CheckTokenExpired()
     {
-        return IsTokenExpiredStatic(_settingsService.Current);
+        return _authenticationRejected || IsTokenExpiredStatic(_settingsService.Current);
     }
 
     public bool UpdateTokenExpiredStatus()
     {
+        if (_watcher == null) SetupWatcher();
         bool expired = CheckTokenExpired();
         if (expired != IsExpired)
         {
@@ -337,6 +360,7 @@ public sealed class ClaudeAuthService : IDisposable
             bool refreshed = await TrySilentTokenRefreshAsync(_settingsService.Current);
             if (refreshed)
             {
+                _authenticationRejected = false;
                 UpdateTokenExpiredStatus();
                 CredentialsChanged?.Invoke(this, EventArgs.Empty);
                 return true;
@@ -354,29 +378,42 @@ public sealed class ClaudeAuthService : IDisposable
         lock (_loginLock)
         {
             _lastAutoLoginAttemptUtc = DateTimeOffset.UtcNow;
-            LaunchInteractiveLogin();
-            return true;
+            return LaunchInteractiveLogin(_settingsService.Current);
         }
         }
         finally { _autoLoginGate.Release(); }
     }
 
-    public static void LaunchInteractiveLogin()
+    public static bool LaunchInteractiveLogin(AppSettings? settings = null)
     {
         try
         {
+            string? configDir = null;
+            if (settings != null)
+            {
+                string effectivePath = settings.GetEffectiveClaudeCredentialsPath();
+                if (!Path.GetFileName(effectivePath).Equals(".credentials.json", StringComparison.OrdinalIgnoreCase))
+                {
+                    Debug.WriteLine("Claude CLI login requires a .credentials.json filename.");
+                    return false;
+                }
+                configDir = Path.GetDirectoryName(Path.GetFullPath(effectivePath));
+            }
             var psi = new ProcessStartInfo
             {
                 FileName = "cmd.exe",
                 Arguments = "/c start \"Claude Code Login\" cmd.exe /k \"echo ======================================================== && echo       AI Usage Tracker - Reconexao Claude Code && echo ======================================================== && echo. && echo Iniciando autenticacao... && claude auth login && echo. && echo [OK] Login concluido com sucesso! && timeout /t 3 && exit\"",
-                UseShellExecute = true
+                UseShellExecute = configDir == null
             };
 
-            Process.Start(psi);
+            if (configDir != null)
+                psi.Environment["CLAUDE_CONFIG_DIR"] = configDir;
+            return Process.Start(psi) != null;
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"Failed to start claude auth login: {ex.Message}");
+            return false;
         }
     }
 
