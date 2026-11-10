@@ -17,6 +17,22 @@ public static class Win32Interop
 
     private const int AF_INET = 2;
     private const int TCP_TABLE_OWNER_PID_LISTENER = 3;
+    private const int UOI_NAME = 2;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetThreadDesktop(int dwThreadId);
+
+    [DllImport("kernel32.dll")]
+    private static extern int GetCurrentThreadId();
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetUserObjectInformation(
+        IntPtr hObj,
+        int nIndex,
+        System.Text.StringBuilder pvInfo,
+        int nLength,
+        out int lpnLengthNeeded);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)]
     private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
@@ -115,6 +131,32 @@ public static class Win32Interop
             exStyle &= ~WS_EX_TRANSPARENT;
         }
         SetWindowLongPtr(hWnd, GWL_EXSTYLE, exStyle);
+    }
+
+    public static string GetCurrentDesktopName()
+    {
+        try
+        {
+            IntPtr hDesk = GetThreadDesktop(GetCurrentThreadId());
+            if (hDesk == IntPtr.Zero) return string.Empty;
+            var sb = new System.Text.StringBuilder(256);
+            if (GetUserObjectInformation(hDesk, UOI_NAME, sb, sb.Capacity * 2, out _))
+            {
+                return sb.ToString();
+            }
+        }
+        catch
+        {
+            // Ignore desktop query errors
+        }
+        return string.Empty;
+    }
+
+    public static bool IsInteractiveDefaultDesktop()
+    {
+        string desk = GetCurrentDesktopName();
+        if (string.IsNullOrWhiteSpace(desk)) return true;
+        return !desk.StartsWith("exebox-", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

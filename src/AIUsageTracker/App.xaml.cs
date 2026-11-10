@@ -55,18 +55,35 @@ public partial class App : Application
 
         try
         {
+            string logPath = Path.Combine(AppContext.BaseDirectory, "startup.log");
+
             // 3. Normal Single-Instance Desktop HUD + System Tray Application
+            // If an existing instance is running (e.g. stuck or older build), terminate it so manual launch always succeeds.
+            TerminateExistingInstances(logPath);
+
             _singleInstanceMutex = new Mutex(true, @"Local\AIUsageTracker_SingleInstance_Mutex", out bool createdNew);
             if (!createdNew)
             {
-                File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "startup.log"), $"{DateTime.Now}: Mutex already exists, shutting down.\n");
-                Shutdown(0);
-                return;
+                try
+                {
+                    _singleInstanceMutex.WaitOne(TimeSpan.FromSeconds(2));
+                }
+                catch (AbandonedMutexException)
+                {
+                    // Previous instance terminated and released the mutex
+                }
             }
 
-            File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "startup.log"), $"{DateTime.Now}: Mutex acquired. Initializing services...\n");
+            File.AppendAllText(logPath, $"{DateTime.Now}: Mutex acquired. Initializing services...\n");
 
             _settingsService = new SettingsService();
+            if (!_settingsService.Current.ShowDesktopWidget)
+            {
+                var updated = _settingsService.Current.Clone();
+                updated.ShowDesktopWidget = true;
+                _settingsService.Update(updated, notify: false);
+            }
+
             _claudeAuthService = new ClaudeAuthService(_settingsService);
             _pollingService = new QuotaPollingService(_settingsService, _claudeAuthService);
             _mainViewModel = new MainViewModel(_settingsService, _pollingService, OpenSettingsWindow, _claudeAuthService);
@@ -94,17 +111,47 @@ public partial class App : Application
                 }
             };
 
-            if (_settingsService.Current.ShowDesktopWidget)
-            {
-                _desktopWidgetWindow.Show();
-            }
+            _desktopWidgetWindow.Show();
+            _desktopWidgetWindow.Activate();
 
             _pollingService.Start();
-            File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "startup.log"), $"{DateTime.Now}: Application started successfully.\n");
+            File.AppendAllText(logPath, $"{DateTime.Now}: Application started successfully.\n");
         }
         catch (Exception ex)
         {
             File.AppendAllText(Path.Combine(AppContext.BaseDirectory, "startup.log"), $"{DateTime.Now}: Crash on startup: {ex}\n");
+        }
+    }
+
+    private static void TerminateExistingInstances(string logPath)
+    {
+        try
+        {
+            int currentPid = Environment.ProcessId;
+            foreach (var proc in System.Diagnostics.Process.GetProcessesByName("AIUsageTracker"))
+            {
+                try
+                {
+                    if (proc.Id != currentPid)
+                    {
+                        File.AppendAllText(logPath, $"{DateTime.Now}: Terminating previous instance (PID {proc.Id})...\n");
+                        proc.Kill();
+                        proc.WaitForExit(2000);
+                    }
+                }
+                catch
+                {
+                    // Ignore if already exited
+                }
+                finally
+                {
+                    proc.Dispose();
+                }
+            }
+        }
+        catch
+        {
+            // Ignore process enumeration errors
         }
     }
 

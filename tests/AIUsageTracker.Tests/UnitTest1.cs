@@ -384,6 +384,36 @@ public class QuotaTrackerTests
         Assert.InRange(weeklyItem.UsedPercent, 44.0, 45.0);
         Assert.InRange(weeklyItem.RemainingPercent, 55.0, 56.0);
     }
+
+    [Fact]
+    public void QuotaBarViewModel_ComputesResetTimeProgressCorrectly()
+    {
+        var item5h = new QuotaItem
+        {
+            Id = "claude.session",
+            Provider = QuotaProviderType.ClaudeCode,
+            ProviderBadge = "CLAUDE",
+            BadgeColorHex = "#D97757",
+            Title = "Claude Code (5h)",
+            UsedPercent = 40.0,
+            ResetTime = DateTimeOffset.UtcNow.AddHours(2.5),
+            WindowDuration = TimeSpan.FromHours(5),
+            IsAvailable = true
+        };
+
+        var settingsRemaining = new AppSettings { ShowRemainingInsteadOfUsed = true, ShowResetCountdown = true };
+        var vmRemaining = new QuotaBarViewModel(item5h, settingsRemaining);
+
+        Assert.True(vmRemaining.HasResetCountdown);
+        Assert.InRange(vmRemaining.ResetTimeRemainingPercent, 49.0, 51.0);
+        Assert.InRange(vmRemaining.ResetDisplayPercentValue, 49.0, 51.0);
+
+        var settingsUsed = new AppSettings { ShowRemainingInsteadOfUsed = false, ShowResetCountdown = true };
+        var vmUsed = new QuotaBarViewModel(item5h, settingsUsed);
+
+        Assert.InRange(vmUsed.ResetTimeElapsedPercent, 49.0, 51.0);
+        Assert.InRange(vmUsed.ResetDisplayPercentValue, 49.0, 51.0);
+    }
 }
 
 

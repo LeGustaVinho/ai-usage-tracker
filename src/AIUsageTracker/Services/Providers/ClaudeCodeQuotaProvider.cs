@@ -422,6 +422,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 Title = "Claude Code (5h)",
                 UsedPercent = Math.Clamp(fiveHourUsed, 0.0, 100.0),
                 ResetTime = fiveHourReset,
+                WindowDuration = TimeSpan.FromHours(5),
                 Subtitle = subtitle,
                 SourceDetail = source,
                 IsAvailable = hasFiveHour ||
@@ -468,6 +469,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 Title = "Claude Code (7d)",
                 UsedPercent = Math.Clamp(sevenDayUsed, 0.0, 100.0),
                 ResetTime = sevenDayReset,
+                WindowDuration = TimeSpan.FromDays(7),
                 Subtitle = weeklySubtitle,
                 SourceDetail = source,
                 IsAvailable = hasSevenDay ||
@@ -490,6 +492,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                     Title = "Claude Opus (7d)",
                     UsedPercent = opusUsed,
                     ResetTime = opusReset,
+                    WindowDuration = TimeSpan.FromDays(7),
                     Subtitle = "Cota semanal dedicada Opus",
                     SourceDetail = "Anthropic OAuth API",
                     IsAvailable = true,
@@ -508,6 +511,7 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                     Title = "Claude Sonnet (7d)",
                     UsedPercent = sonnetUsed,
                     ResetTime = sonnetReset,
+                    WindowDuration = TimeSpan.FromDays(7),
                     Subtitle = "Cota semanal dedicada Sonnet",
                     SourceDetail = "Anthropic OAuth API",
                     IsAvailable = true,

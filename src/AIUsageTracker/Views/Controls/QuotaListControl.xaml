@@ -34,6 +34,33 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <!-- Secondary Rounded ProgressBar Style for Reset Countdown -->
+        <Style x:Key="ResetProgressBarStyle" TargetType="ProgressBar">
+            <Setter Property="Height" Value="5" />
+            <Setter Property="Minimum" Value="0" />
+            <Setter Property="Maximum" Value="100" />
+            <Setter Property="Background" Value="#1E293B" />
+            <Setter Property="BorderBrush" Value="#26475569" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ProgressBar">
+                        <Grid x:Name="TemplateRoot" SnapsToDevicePixels="True">
+                            <Border x:Name="PART_Track"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="2.5" />
+                            <Border x:Name="PART_Indicator"
+                                    HorizontalAlignment="Left"
+                                    Background="{TemplateBinding Foreground}"
+                                    CornerRadius="2.5" />
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </UserControl.Resources>
 
     <ItemsControl ItemsSource="{Binding QuotaBars}">
@@ -83,7 +110,7 @@
                                        Margin="6,0,6,0"
                                        VerticalAlignment="Center"
                                        FontSize="10.5"
-                                       Foreground="#94A3B8"
+                                       Foreground="#7DD3FC"
                                        Text="{Binding ResetCountdownText}"
                                        Visibility="{Binding HasResetCountdown, Converter={StaticResource BoolToVis}}" />
 
@@ -96,12 +123,19 @@
                                        Text="{Binding DisplayPercentText}" />
                         </Grid>
 
-                        <!-- Row 2: Progress Bar -->
+                        <!-- Row 2: Quota Progress Bar -->
                         <ProgressBar Style="{StaticResource QuotaProgressBarStyle}"
                                      Foreground="{Binding BarFillBrush}"
                                      Value="{Binding DisplayPercentValue, Mode=OneWay}" />
 
-                        <!-- Row 3: Optional Subtitle -->
+                        <!-- Row 3: Time Until Reset Progress Bar -->
+                        <ProgressBar Margin="0,3.5,0,0"
+                                     Style="{StaticResource ResetProgressBarStyle}"
+                                     Foreground="{Binding ResetBarFillBrush}"
+                                     Value="{Binding ResetDisplayPercentValue, Mode=OneWay}"
+                                     Visibility="{Binding HasResetCountdown, Converter={StaticResource BoolToVis}}" />
+
+                        <!-- Row 4: Optional Subtitle -->
                         <TextBlock Margin="0,4,0,0"
                                    FontSize="10"
                                    Foreground="#94A3B8"

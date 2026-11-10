@@ -12,6 +12,7 @@ public sealed class QuotaBarViewModel : ObservableObject
     private static readonly Brush NormalBrush = CreateGradient("#10B981", "#34D399");
     private static readonly Brush WarningBrush = CreateGradient("#F59E0B", "#FBBF24");
     private static readonly Brush CriticalBrush = CreateGradient("#EF4444", "#F87171");
+    private static readonly Brush ResetTimeBrush = CreateGradient("#0284C7", "#38BDF8");
     private static readonly Brush OfflineBrush = CreateSolid("#475569");
 
     private static readonly Brush NormalTextBrush = CreateSolid("#34D399");
@@ -32,6 +33,10 @@ public sealed class QuotaBarViewModel : ObservableObject
     public string DisplayPercentText { get; }
     public string ResetCountdownText { get; }
     public bool HasResetCountdown { get; }
+    public double ResetTimeRemainingPercent { get; }
+    public double ResetTimeElapsedPercent { get; }
+    public double ResetDisplayPercentValue { get; }
+    public Brush ResetBarFillBrush { get; }
     public QuotaStatusLevel StatusLevel { get; }
     public Brush BarFillBrush { get; }
     public Brush StatusAccentBrush { get; }
@@ -56,6 +61,10 @@ public sealed class QuotaBarViewModel : ObservableObject
             DisplayPercentText = "OFFLINE";
             ResetCountdownText = string.Empty;
             HasResetCountdown = false;
+            ResetTimeRemainingPercent = 0;
+            ResetTimeElapsedPercent = 0;
+            ResetDisplayPercentValue = 0;
+            ResetBarFillBrush = OfflineBrush;
             BarFillBrush = OfflineBrush;
             StatusAccentBrush = OfflineTextBrush;
         }
@@ -97,9 +106,19 @@ public sealed class QuotaBarViewModel : ObservableObject
 
             ResetCountdownText = countdown;
             HasResetCountdown = !string.IsNullOrWhiteSpace(countdown);
+            ResetBarFillBrush = ResetTimeBrush;
+
+            if (HasResetCountdown)
+            {
+                ResetTimeRemainingPercent = TimeFormatHelper.CalculateResetTimeRemainingPercent(item);
+                ResetTimeElapsedPercent = Math.Clamp(100.0 - ResetTimeRemainingPercent, 0.0, 100.0);
+                ResetDisplayPercentValue = settings.ShowRemainingInsteadOfUsed
+                    ? ResetTimeRemainingPercent
+                    : ResetTimeElapsedPercent;
+            }
         }
 
-        ToolTipText = BuildToolTip(item);
+        ToolTipText = BuildToolTip(item, ResetTimeRemainingPercent);
     }
 
     private static string FormatPercentNumber(double value)
@@ -113,7 +132,7 @@ public sealed class QuotaBarViewModel : ObservableObject
         return value.ToString("0.0", CultureInfo.InvariantCulture);
     }
 
-    private static string BuildToolTip(QuotaItem item)
+    private static string BuildToolTip(QuotaItem item, double resetTimeRemainingPercent)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"{item.Title} [{item.ProviderBadge}]");
@@ -122,7 +141,7 @@ public sealed class QuotaBarViewModel : ObservableObject
             sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"Consumido: {item.UsedPercent:0.0}%  |  Restante: {item.RemainingPercent:0.0}%"));
             if (item.ResetTime.HasValue)
             {
-                sb.AppendLine(TimeFormatHelper.FormatResetFullLocal(item.ResetTime));
+                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{TimeFormatHelper.FormatResetFullLocal(item.ResetTime)} • Ciclo restante: {resetTimeRemainingPercent:0.#}%"));
             }
         }
         else

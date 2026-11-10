@@ -27,6 +27,7 @@ public sealed class QuotaItem
     public double UsedPercent { get; init; }
     public double RemainingPercent => Math.Clamp(100.0 - UsedPercent, 0.0, 100.0);
     public DateTimeOffset? ResetTime { get; init; }
+    public TimeSpan? WindowDuration { get; init; }
     public string? Subtitle { get; init; }
     public string? SourceDetail { get; init; }
     public bool IsAvailable { get; init; } = true;

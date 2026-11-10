@@ -20,6 +20,7 @@ public sealed class SettingsService
 
     public string SettingsFilePath { get; }
     public AppSettings Current { get; private set; }
+    private readonly bool _isCustomPath;
 
     public event EventHandler<AppSettings>? SettingsChanged;
 
@@ -28,6 +29,7 @@ public sealed class SettingsService
         if (!string.IsNullOrWhiteSpace(customSettingsPath))
         {
             SettingsFilePath = customSettingsPath;
+            _isCustomPath = true;
         }
         else
         {
@@ -35,6 +37,7 @@ public sealed class SettingsService
             string dir = Path.Combine(appData, "AIUsageTracker");
             Directory.CreateDirectory(dir);
             SettingsFilePath = Path.Combine(dir, "settings.json");
+            _isCustomPath = false;
         }
 
         Current = LoadFromDisk();
@@ -50,7 +53,10 @@ public sealed class SettingsService
                 var loaded = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions);
                 if (loaded != null)
                 {
-                    loaded.StartWithWindows = IsStartupRegistered();
+                    if (!_isCustomPath)
+                    {
+                        loaded.StartWithWindows = IsStartupRegistered();
+                    }
                     return loaded;
                 }
             }
@@ -62,7 +68,7 @@ public sealed class SettingsService
 
         var defaults = new AppSettings
         {
-            StartWithWindows = IsStartupRegistered()
+            StartWithWindows = !_isCustomPath && IsStartupRegistered()
         };
         SaveToDisk(defaults);
         return defaults;
@@ -71,7 +77,10 @@ public sealed class SettingsService
     public void Update(AppSettings newSettings, bool notify = true)
     {
         Current = newSettings;
-        ApplyWindowsStartup(newSettings.StartWithWindows);
+        if (!_isCustomPath)
+        {
+            ApplyWindowsStartup(newSettings.StartWithWindows);
+        }
         SaveToDisk(newSettings);
         if (notify)
         {
@@ -128,7 +137,8 @@ public sealed class SettingsService
             if (enable)
             {
                 string? exePath = Process.GetCurrentProcess().MainModule?.FileName;
-                if (!string.IsNullOrWhiteSpace(exePath))
+                if (!string.IsNullOrWhiteSpace(exePath) &&
+                    exePath.EndsWith("AIUsageTracker.exe", StringComparison.OrdinalIgnoreCase))
                 {
                     key.SetValue(StartupValueName, $"\"{exePath}\"");
                 }
