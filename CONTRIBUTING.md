@@ -7,7 +7,7 @@ Thank you for considering contributing to **AI Usage Tracker**! We welcome bug f
 ### Prerequisites
 - **Windows 10 / 11 (64-bit)**
 - **[.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)**
-- **Visual Studio 2022 / 2025** (with Desktop development with .NET workload) or **VS Code** / **JetBrains Rider**
+- A code editor or IDE that supports the .NET 10 SDK
 
 ### Building and Running
 1. Clone the repository:
@@ -36,8 +36,8 @@ Thank you for considering contributing to **AI Usage Tracker**! We welcome bug f
 
 1. **Branch Naming**: Use descriptive branch names like `feat/support-ollama` or `fix/claude-oauth-retry`.
 2. **Coding Standards**:
-   - Follow standard modern C# conventions (C# 13, nullable reference types enabled, file-scoped namespaces).
-   - Use MVVM pattern with `CommunityToolkit.Mvvm`.
+   - Use nullable reference types and file-scoped namespaces.
+   - Follow the existing MVVM pattern and WPF data bindings.
    - Preserve non-blocking async operations — never block the UI thread (`Dispatcher`).
 3. **Tests**: Ensure that existing unit tests pass (`dotnet test`) and write new tests for bug fixes or new quota providers.
 4. **Clean Commits**: Keep commit messages concise, descriptive, and written in English (e.g., `feat: ...`, `fix: ...`, `docs: ...`).
