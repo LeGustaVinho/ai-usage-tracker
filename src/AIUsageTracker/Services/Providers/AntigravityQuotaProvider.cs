@@ -25,13 +25,31 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         """{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en"}}""";
     private const string SummaryRequestBodyJson =
         """{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en","ideVersion":"unknown"}}""";
+    private const string CarbonQuotaId = "agy.gemini_carbon";
+    private const string LegacyCarbonQuotaId = "agy.gemini_4_carbon";
+    private const string CarbonTitle = "Gemini 4 Carbon";
+    private const string CliSourceDetail = "Antigravity CLI (agy /quota)";
 
-    private CachedEndpoint? _cachedEndpoint;
+    private readonly Func<IEnumerable<LanguageServerEndpoint>> _discoverEndpoints;
+    private readonly Func<LanguageServerEndpoint, bool, CancellationToken, Task<QuotaResponses?>> _fetchEndpointAsync;
+    private LanguageServerEndpoint? _cachedEndpoint;
 
     public QuotaProviderType ProviderType => QuotaProviderType.Antigravity;
 
-    private sealed record CachedEndpoint(int ProcessId, string BaseUrl, string CsrfToken);
-    private sealed record QuotaResponses(string? UserStatusJson, string? SummaryJson);
+    internal sealed record LanguageServerEndpoint(int ProcessId, string BaseUrl, string CsrfToken);
+    internal sealed record QuotaResponses(string? UserStatusJson, string? SummaryJson);
+
+    public AntigravityQuotaProvider() : this(DiscoverLanguageServerEndpoints, TryFetchEndpointAsync)
+    {
+    }
+
+    internal AntigravityQuotaProvider(
+        Func<IEnumerable<LanguageServerEndpoint>> discoverEndpoints,
+        Func<LanguageServerEndpoint, bool, CancellationToken, Task<QuotaResponses?>> fetchEndpointAsync)
+    {
+        _discoverEndpoints = discoverEndpoints;
+        _fetchEndpointAsync = fetchEndpointAsync;
+    }
 
     private static HttpClient CreateHttpClient()
     {
@@ -55,15 +73,11 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         // 1. Try local language_server (when Antigravity IDE is open and running)
         try
         {
-            QuotaResponses? responses = await QueryLanguageServerAsync(settings.ShowAntigravityGeminiWeekly, cancellationToken);
-            if (responses != null)
+            var liveItems = await QueryLanguageServerAsync(settings, cancellationToken);
+            if (liveItems.Count > 0)
             {
-                var liveItems = ParseQuotaResponses(responses.UserStatusJson, responses.SummaryJson, settings);
-                if (liveItems.Count > 0 && liveItems.Any(x => x.IsAvailable))
-                {
-                    SaveLastKnownQuotas(liveItems);
-                    return liveItems;
-                }
+                SaveLastKnownQuotas(liveItems, preserveHiddenCarbon: !settings.ShowAntigravityCarbon);
+                return WithCarbonPlaceholder(liveItems, settings);
             }
         }
         catch (Exception ex)
@@ -77,10 +91,14 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
             try
             {
                 var cliItems = await FetchQuotasFromCliAsync(settings, cancellationToken);
-                if (cliItems != null && cliItems.Count > 0 && cliItems.Any(x => x.IsAvailable))
+                if (cliItems is { Count: > 0 })
                 {
-                    SaveLastKnownQuotas(cliItems);
-                    return cliItems;
+                    var visibleItems = FilterCliItemsBySettings(cliItems, settings);
+                    if (visibleItems.Count > 0)
+                    {
+                        SaveLastKnownQuotas(cliItems, preserveHiddenCarbon: !settings.ShowAntigravityCarbon);
+                        return WithCarbonPlaceholder(visibleItems, settings);
+                    }
                 }
             }
             catch (Exception ex)
@@ -93,38 +111,78 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         var lastKnown = GetLastKnownQuotas(settings);
         if (lastKnown != null && lastKnown.Count > 0)
         {
-            return lastKnown;
+            return WithCarbonPlaceholder(lastKnown, settings);
         }
 
         // 4. Fallback if never connected before
-        return CreateOfflineFallback(null, settings);
+        return WithCarbonPlaceholder(CreateOfflineFallback(settings), settings);
     }
 
-    private async Task<QuotaResponses?> QueryLanguageServerAsync(bool needsWeeklySummary, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<QuotaItem>> QueryLanguageServerAsync(AppSettings settings, CancellationToken cancellationToken)
     {
-        QuotaResponses? legacyFallback = null;
+        // Prefer an endpoint that provides both quotas. Carbon breaks a tie between partial responses.
+        const int flashWeeklyScore = 1;
+        const int carbonScore = 2;
+        int requestedScore = (settings.ShowAntigravityGeminiWeekly ? flashWeeklyScore : 0) +
+                             (settings.ShowAntigravityCarbon ? carbonScore : 0);
+        LanguageServerEndpoint? cachedEndpoint = _cachedEndpoint;
+        LanguageServerEndpoint? bestEndpoint = null;
+        IReadOnlyList<QuotaItem> bestItems = Array.Empty<QuotaItem>();
+        int bestScore = -1;
 
-        // Prefer servers that expose the weekly summary. The IDE-only language_server
-        // usually supports GetUserStatus but not RetrieveUserQuotaSummary.
-        if (_cachedEndpoint != null)
+        if (cachedEndpoint != null && await TryEndpointAsync(cachedEndpoint))
         {
-            QuotaResponses? cachedResult = await TryFetchEndpointAsync(_cachedEndpoint.BaseUrl, _cachedEndpoint.CsrfToken, needsWeeklySummary, cancellationToken);
-            if (cachedResult != null)
+            return bestItems;
+        }
+
+        foreach (LanguageServerEndpoint endpoint in _discoverEndpoints())
+        {
+            if (endpoint != cachedEndpoint && await TryEndpointAsync(endpoint))
             {
-                if (!needsWeeklySummary || HasGeminiWeeklyQuota(cachedResult.SummaryJson))
-                {
-                    return cachedResult;
-                }
-                legacyFallback = cachedResult;
-            }
-            else
-            {
-                _cachedEndpoint = null;
+                break;
             }
         }
 
-        // Discover all running language servers so an IDE endpoint cannot hide
-        // a richer Antigravity app endpoint on the same machine.
+        _cachedEndpoint = bestEndpoint;
+        return bestItems;
+
+        async Task<bool> TryEndpointAsync(LanguageServerEndpoint endpoint)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            QuotaResponses? response = await _fetchEndpointAsync(endpoint, requestedScore != 0, cancellationToken);
+            if (response == null)
+            {
+                return false;
+            }
+
+            var items = ParseQuotaResponses(response.UserStatusJson, response.SummaryJson, settings);
+            if (!items.Any(item => item.IsAvailable))
+            {
+                return false;
+            }
+
+            int score = 0;
+            if (settings.ShowAntigravityGeminiWeekly && items.Any(item => item.IsAvailable && item.Id == "agy.gemini_weekly"))
+            {
+                score += flashWeeklyScore;
+            }
+            if (settings.ShowAntigravityCarbon && items.Any(item => item.IsAvailable && item.Id == CarbonQuotaId))
+            {
+                score += carbonScore;
+            }
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestEndpoint = endpoint;
+                bestItems = items;
+            }
+            return score == requestedScore;
+        }
+    }
+
+    private static IEnumerable<LanguageServerEndpoint> DiscoverLanguageServerEndpoints()
+    {
         Process[] processes = Process.GetProcessesByName("language_server");
         try
         {
@@ -153,30 +211,8 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
 
                 foreach (int port in ports)
                 {
-                    foreach (string scheme in new[] { "http", "https" })
-                    {
-                        string baseUrl = $"{scheme}://127.0.0.1:{port}";
-                        if (_cachedEndpoint?.ProcessId == proc.Id && _cachedEndpoint.BaseUrl == baseUrl)
-                        {
-                            continue;
-                        }
-
-                        QuotaResponses? result = await TryFetchEndpointAsync(baseUrl, csrfToken, needsWeeklySummary, cancellationToken);
-                        if (result != null)
-                        {
-                            if (!needsWeeklySummary || HasGeminiWeeklyQuota(result.SummaryJson))
-                            {
-                                _cachedEndpoint = new CachedEndpoint(proc.Id, baseUrl, csrfToken);
-                                return result;
-                            }
-
-                            if (legacyFallback == null)
-                            {
-                                legacyFallback = result;
-                                _cachedEndpoint = new CachedEndpoint(proc.Id, baseUrl, csrfToken);
-                            }
-                        }
-                    }
+                    yield return new LanguageServerEndpoint(proc.Id, $"http://127.0.0.1:{port}", csrfToken);
+                    yield return new LanguageServerEndpoint(proc.Id, $"https://127.0.0.1:{port}", csrfToken);
                 }
             }
         }
@@ -187,15 +223,13 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                 proc.Dispose();
             }
         }
-
-        return legacyFallback;
     }
 
-    private static async Task<QuotaResponses?> TryFetchEndpointAsync(string baseUrl, string csrfToken, bool needsWeeklySummary, CancellationToken cancellationToken)
+    private static async Task<QuotaResponses?> TryFetchEndpointAsync(LanguageServerEndpoint endpoint, bool requestSummary, CancellationToken cancellationToken)
     {
-        string? status = await TryCallRpcAsync(baseUrl, csrfToken, "GetUserStatus", "clientModelConfigs", cancellationToken);
-        string? summary = needsWeeklySummary
-            ? await TryCallRpcAsync(baseUrl, csrfToken, "RetrieveUserQuotaSummary", "\"groups\"", cancellationToken)
+        string? status = await TryCallRpcAsync(endpoint.BaseUrl, endpoint.CsrfToken, "GetUserStatus", "clientModelConfigs", cancellationToken);
+        string? summary = requestSummary
+            ? await TryCallRpcAsync(endpoint.BaseUrl, endpoint.CsrfToken, "RetrieveUserQuotaSummary", "\"groups\"", cancellationToken)
             : null;
         return status != null || summary != null ? new QuotaResponses(status, summary) : null;
     }
@@ -233,14 +267,14 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
 
     internal static IReadOnlyList<QuotaItem> ParseQuotaResponses(string? statusJson, string? summaryJson, AppSettings settings)
     {
-        var items = !string.IsNullOrWhiteSpace(statusJson)
-            ? ParseUserStatusResponse(statusJson, settings).ToList()
-            : new List<QuotaItem>();
+        using JsonDocument? summary = TryParseDocument(summaryJson);
+        JsonElement groups = ReadSummaryGroups(summary?.RootElement ?? default);
+        var items = ParseUserStatusResponse(statusJson, settings, out QuotaItem? carbonFromStatus);
 
         if (settings.ShowAntigravityFlash &&
             !items.Any(x => x.IsAvailable && x.Id.StartsWith("agy.gemini_", StringComparison.Ordinal)))
         {
-            QuotaItem? session = ParseGeminiSummaryQuota(summaryJson, weekly: false);
+            QuotaItem? session = ParseGeminiSummaryQuota(groups, weekly: false);
             if (session != null)
             {
                 items.Add(session);
@@ -248,7 +282,7 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         }
 
         QuotaItem? weekly = settings.ShowAntigravityGeminiWeekly
-            ? ParseGeminiSummaryQuota(summaryJson, weekly: true) : null;
+            ? ParseGeminiSummaryQuota(groups, weekly: true) : null;
         if (weekly != null)
         {
             items.Add(weekly);
@@ -271,43 +305,47 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
             });
         }
 
-        return items.Count > 0 ? items : CreateOfflineFallback();
+        if (settings.ShowAntigravityCarbon &&
+            (ParseCarbonBuckets(groups, "Antigravity RetrieveUserQuotaSummary (local)") ?? carbonFromStatus) is { } carbon)
+        {
+            items.Add(carbon);
+        }
+
+        return items;
     }
 
-    private static bool HasGeminiWeeklyQuota(string? summaryJson) =>
-        ParseGeminiSummaryQuota(summaryJson, weekly: true) != null;
-
-    private static QuotaItem? ParseGeminiSummaryQuota(string? summaryJson, bool weekly)
+    private static JsonDocument? TryParseDocument(string? json)
     {
-        if (string.IsNullOrWhiteSpace(summaryJson))
+        if (string.IsNullOrWhiteSpace(json))
         {
             return null;
         }
 
-        JsonDocument document;
         try
         {
-            document = JsonDocument.Parse(summaryJson);
+            return JsonDocument.Parse(json);
         }
         catch (JsonException)
         {
             return null;
         }
+    }
 
-        using JsonDocument ownedDocument = document;
-        JsonElement root = document.RootElement;
-        if (root.ValueKind != JsonValueKind.Object)
-        {
-            return null;
-        }
-
-        if (root.TryGetProperty("response", out JsonElement response))
+    private static JsonElement ReadSummaryGroups(JsonElement root)
+    {
+        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("response", out JsonElement response))
         {
             root = response;
         }
 
-        if (root.ValueKind != JsonValueKind.Object ||
-            !root.TryGetProperty("groups", out JsonElement groups) || groups.ValueKind != JsonValueKind.Array)
+        return root.ValueKind == JsonValueKind.Object &&
+            root.TryGetProperty("groups", out JsonElement groups) && groups.ValueKind == JsonValueKind.Array
+            ? groups : default;
+    }
+
+    private static QuotaItem? ParseGeminiSummaryQuota(JsonElement groups, bool weekly)
+    {
+        if (groups.ValueKind != JsonValueKind.Array)
         {
             return null;
         }
@@ -323,9 +361,9 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
             }
 
             string groupName = name.GetString()!;
-            // Must belong to Gemini Models (Flash / Pro). Exclude Argon which is tracked separately!
+            // Carbon and Argon have their own indicators.
             if (!groupName.Contains("Gemini", StringComparison.OrdinalIgnoreCase) ||
-                groupName.Contains("Argon", StringComparison.OrdinalIgnoreCase))
+                groupName.Contains("Argon", StringComparison.OrdinalIgnoreCase) || IsCarbonGroup(group))
             {
                 continue;
             }
@@ -338,7 +376,7 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
 
             foreach (JsonElement bucket in buckets.EnumerateArray())
             {
-                if (bucket.ValueKind != JsonValueKind.Object || !IsMatchingBucket(bucket, weekly))
+                if (bucket.ValueKind != JsonValueKind.Object || IsCarbonBucket(bucket) || !IsMatchingBucket(bucket, weekly))
                 {
                     continue;
                 }
@@ -389,9 +427,9 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
     private static bool IsMatchingBucket(JsonElement bucket, bool weekly)
     {
         // 1. Direct match on bucketId (e.g. "gemini-weekly", "gemini-5h")
-        if (bucket.TryGetProperty("bucketId", out JsonElement bId) && bId.ValueKind == JsonValueKind.String)
+        string? id = ReadBucketId(bucket);
+        if (id != null)
         {
-            string id = bId.GetString() ?? string.Empty;
             if (weekly && (id.Equals("gemini-weekly", StringComparison.OrdinalIgnoreCase) || id.Contains("weekly", StringComparison.OrdinalIgnoreCase)))
             {
                 return true;
@@ -403,17 +441,10 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         }
 
         // 2. Match on window or displayName
-        string cadence = bucket.TryGetProperty("window", out JsonElement window) && window.ValueKind == JsonValueKind.String
-            ? window.GetString() ?? string.Empty : string.Empty;
+        string? cadence = ReadStringProperty(bucket, "window");
         if (string.IsNullOrWhiteSpace(cadence))
         {
-            foreach (string field in new[] { "bucketId", "displayName" })
-            {
-                if (bucket.TryGetProperty(field, out JsonElement text) && text.ValueKind == JsonValueKind.String)
-                {
-                    cadence += " " + text.GetString();
-                }
-            }
+            cadence = $"{id} {ReadBucketName(bucket)}";
         }
 
         bool isWeekly = cadence.Contains("week", StringComparison.OrdinalIgnoreCase) ||
@@ -428,7 +459,8 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
 
     private static DateTimeOffset? ReadResetTime(JsonElement element)
     {
-        if (!element.TryGetProperty("resetTime", out JsonElement reset))
+        if (!element.TryGetProperty("resetTime", out JsonElement reset) &&
+            !element.TryGetProperty("reset_time", out reset))
         {
             return null;
         }
@@ -455,24 +487,184 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         return null;
     }
 
-    private static IReadOnlyList<QuotaItem> ParseUserStatusResponse(string json, AppSettings settings)
-    {
-        using JsonDocument doc = JsonDocument.Parse(json);
-        JsonElement root = doc.RootElement;
+    private static string? ReadStringProperty(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object &&
+        element.TryGetProperty(name, out JsonElement property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString() : null;
 
-        if (!root.TryGetProperty("userStatus", out JsonElement usEl) ||
-            !usEl.TryGetProperty("cascadeModelConfigData", out JsonElement cmcdEl) ||
+    private static string? ReadBucketId(JsonElement bucket) =>
+        ReadStringProperty(bucket, "bucketId") ?? ReadStringProperty(bucket, "id");
+
+    private static string? ReadBucketName(JsonElement bucket) =>
+        ReadStringProperty(bucket, "displayName") ?? ReadStringProperty(bucket, "name");
+
+    private static bool IsCarbonLabel(string? label) =>
+        label != null && EffortSuffixRegex.Replace(label.Trim(), "").Equals(CarbonTitle, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsCarbonId(string? id) =>
+        IsIdOrVariant(id, "gemini-4-carbon") || IsIdOrVariant(id, "gemini-carbon");
+
+    private static bool IsIdOrVariant(string? id, string baseId) =>
+        string.Equals(id, baseId, StringComparison.OrdinalIgnoreCase) ||
+        id?.StartsWith(baseId + "-", StringComparison.OrdinalIgnoreCase) == true;
+
+    private static bool IsCarbonGroup(JsonElement group) =>
+        IsCarbonLabel(ReadBucketName(group)) ||
+        IsCarbonId(ReadStringProperty(group, "id"));
+
+    private static bool IsCarbonBucket(JsonElement bucket)
+    {
+        string? name = ReadBucketName(bucket);
+        return IsCarbonId(ReadBucketId(bucket)) || IsCarbonLabel(name) ||
+            name?.StartsWith(CarbonTitle + " Weekly Limit", StringComparison.OrdinalIgnoreCase) == true ||
+            name?.StartsWith(CarbonTitle + " Five Hour Limit", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static bool TryGetRemainingFraction(JsonElement element, out JsonElement fraction) =>
+        element.TryGetProperty("remainingFraction", out fraction) || element.TryGetProperty("remaining_fraction", out fraction);
+
+    private static bool TryReadRemainingFraction(JsonElement fraction, out double value)
+    {
+        value = 0;
+        return fraction.ValueKind == JsonValueKind.Number && fraction.TryGetDouble(out value) &&
+            double.IsFinite(value) && value >= 0 && value <= 1;
+    }
+
+    private static TimeSpan? ReadBucketDuration(JsonElement bucket)
+    {
+        if (IsMatchingBucket(bucket, weekly: true))
+        {
+            return TimeSpan.FromDays(7);
+        }
+
+        return IsMatchingBucket(bucket, weekly: false) ? TimeSpan.FromHours(5) : null;
+    }
+
+    private static QuotaItem? ParseCarbonBuckets(JsonElement groups, string sourceDetail)
+    {
+        if (groups.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var carbonQuotas = new List<QuotaItem>();
+        foreach (JsonElement group in groups.EnumerateArray())
+        {
+            if (group.ValueKind != JsonValueKind.Object ||
+                !group.TryGetProperty("buckets", out JsonElement buckets) || buckets.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            bool isCarbonGroup = IsCarbonGroup(group);
+            foreach (JsonElement bucket in buckets.EnumerateArray())
+            {
+                if (bucket.ValueKind != JsonValueKind.Object || !(isCarbonGroup || IsCarbonBucket(bucket)))
+                {
+                    continue;
+                }
+
+                JsonElement remaining = bucket.TryGetProperty("remaining", out JsonElement nested) && nested.ValueKind == JsonValueKind.Object
+                    ? nested : bucket;
+                if ((!TryGetRemainingFraction(remaining, out JsonElement fraction) && !TryGetRemainingFraction(bucket, out fraction)) ||
+                    !TryReadRemainingFraction(fraction, out double remainingFraction))
+                {
+                    continue;
+                }
+
+                carbonQuotas.Add(CreateCarbonQuota(remainingFraction, ReadResetTime(bucket) ?? ReadResetTime(remaining),
+                    ReadBucketDuration(bucket), sourceDetail));
+            }
+        }
+
+        return carbonQuotas.OrderByDescending(item => item.WindowDuration)
+            .ThenByDescending(item => item.UsedPercent).FirstOrDefault();
+    }
+
+    private static QuotaItem? ParseCarbonStatusQuota(JsonElement config, string? modelId)
+    {
+        if ((config.TryGetProperty("disabled", out JsonElement disabled) && disabled.ValueKind == JsonValueKind.True) ||
+            modelId?.EndsWith("-disabled", StringComparison.OrdinalIgnoreCase) == true ||
+            !config.TryGetProperty("quotaInfo", out JsonElement quota) || quota.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        DateTimeOffset? resetTime = ReadResetTime(quota);
+        double remainingFraction = 0;
+        if (TryGetRemainingFraction(quota, out JsonElement fraction))
+        {
+            if (!TryReadRemainingFraction(fraction, out remainingFraction))
+            {
+                return null;
+            }
+        }
+        else if (resetTime == null)
+        {
+            // An omitted protobuf fraction represents zero only with evidence of a quota window.
+            return null;
+        }
+
+        return CreateCarbonQuota(remainingFraction, resetTime, ReadBucketDuration(quota),
+            "Antigravity language_server Connect-RPC");
+    }
+
+    private static QuotaItem CreateCarbonQuota(double? remainingFraction, DateTimeOffset? resetTime = null,
+        TimeSpan? duration = null, string? sourceDetail = null) => new()
+    {
+        Id = CarbonQuotaId,
+        Provider = QuotaProviderType.Antigravity,
+        ProviderBadge = "CARBON",
+        BadgeColorHex = "#3B82F6",
+        Title = CarbonTitle,
+        UsedPercent = (1 - (remainingFraction ?? 1)) * 100,
+        ResetTime = resetTime,
+        WindowDuration = duration,
+        AllowWindowDurationInference = false,
+        SourceDetail = sourceDetail,
+        IsAvailable = remainingFraction.HasValue,
+        UnavailableMessage = remainingFraction.HasValue ? null : "Sem cota disponível",
+        SortOrder = 36
+    };
+
+    internal static IReadOnlyList<QuotaItem> WithCarbonPlaceholder(IReadOnlyList<QuotaItem> items, AppSettings settings)
+    {
+        return settings.ShowAntigravityCarbon && !items.Any(item => item.Id == CarbonQuotaId)
+            ? items.Append(CreateCarbonQuota(null)).ToList() : items;
+    }
+
+    private static List<QuotaItem> ParseUserStatusResponse(string? json, AppSettings settings, out QuotaItem? carbonQuota)
+    {
+        carbonQuota = null;
+        var items = new List<QuotaItem>();
+        using JsonDocument? doc = TryParseDocument(json);
+        JsonElement root = doc?.RootElement ?? default;
+
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("userStatus", out JsonElement usEl) || usEl.ValueKind != JsonValueKind.Object ||
+            !usEl.TryGetProperty("cascadeModelConfigData", out JsonElement cmcdEl) || cmcdEl.ValueKind != JsonValueKind.Object ||
             !cmcdEl.TryGetProperty("clientModelConfigs", out JsonElement configsEl) ||
             configsEl.ValueKind != JsonValueKind.Array)
         {
-            return CreateOfflineFallback("Resposta sem clientModelConfigs");
+            return items;
         }
 
         var rawModels = new List<RawAntigravityModel>();
 
         foreach (JsonElement itemEl in configsEl.EnumerateArray())
         {
-            string? label = itemEl.TryGetProperty("label", out JsonElement labelEl) ? labelEl.GetString() : null;
+            string? label = ReadStringProperty(itemEl, "label");
+            string? modelId = ReadStringProperty(itemEl, "modelId");
+            if (IsCarbonLabel(label) || IsCarbonId(modelId))
+            {
+                if (settings.ShowAntigravityCarbon && ParseCarbonStatusQuota(itemEl, modelId) is { } candidate &&
+                    (carbonQuota == null || candidate.UsedPercent > carbonQuota.UsedPercent))
+                {
+                    carbonQuota = candidate;
+                }
+                continue;
+            }
+
             if (string.IsNullOrWhiteSpace(label))
             {
                 continue;
@@ -485,7 +677,8 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
 
             // In Protobuf 3 JSON, remainingFraction is omitted when equal to 0.0 (100% used).
             double remainingFraction = 0.0;
-            if (quotaEl.TryGetProperty("remainingFraction", out JsonElement rfEl) && rfEl.TryGetDouble(out double parsedRf))
+            if (quotaEl.TryGetProperty("remainingFraction", out JsonElement rfEl) && rfEl.ValueKind == JsonValueKind.Number &&
+                rfEl.TryGetDouble(out double parsedRf) && double.IsFinite(parsedRf))
             {
                 remainingFraction = Math.Clamp(parsedRf, 0.0, 1.0);
             }
@@ -501,8 +694,6 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
             double usedPercent = Math.Clamp((1.0 - remainingFraction) * 100.0, 0.0, 100.0);
             rawModels.Add(new RawAntigravityModel(label, usedPercent, resetTime));
         }
-
-        var items = new List<QuotaItem>();
 
         if (settings.GroupAntigravityEffortLevels)
         {
@@ -581,9 +772,15 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
 
     private static bool IsFamilyEnabled(string familyId, AppSettings settings)
     {
+        if (familyId.StartsWith(LegacyCarbonQuotaId, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         return familyId switch
         {
             "agy.gemini_argon" => settings.ShowAntigravityArgon,
+            CarbonQuotaId => settings.ShowAntigravityCarbon,
             "agy.gemini_flash" => settings.ShowAntigravityFlash,
             "agy.gemini_weekly" => settings.ShowAntigravityGeminiWeekly,
             "agy.claude_opus" => settings.ShowAntigravityClaudeOpus,
@@ -645,23 +842,21 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         return 9;
     }
 
-    private static DateTimeOffset? _lastCliFetchTime;
-    private static IReadOnlyList<QuotaItem>? _lastCliCachedItems;
+    private static CachedQuotaRecord? _lastCliCache;
     private static readonly SemaphoreSlim _cliLock = new(1, 1);
 
     internal static async Task<IReadOnlyList<QuotaItem>?> FetchQuotasFromCliAsync(AppSettings settings, CancellationToken cancellationToken)
     {
         // Rate limit CLI executions: if executed less than 20 seconds ago, reuse the cached CLI items
-        if (_lastCliFetchTime.HasValue &&
-            DateTimeOffset.UtcNow - _lastCliFetchTime.Value < TimeSpan.FromSeconds(20) &&
-            _lastCliCachedItems != null)
+        CachedQuotaRecord? cached = _lastCliCache;
+        if (cached != null && DateTimeOffset.UtcNow - cached.CachedAt < TimeSpan.FromSeconds(20))
         {
-            return FilterCliItemsBySettings(_lastCliCachedItems, settings);
+            return cached.Items;
         }
 
         if (!await _cliLock.WaitAsync(100, cancellationToken))
         {
-            return _lastCliCachedItems != null ? FilterCliItemsBySettings(_lastCliCachedItems, settings) : null;
+            return null;
         }
 
         try
@@ -692,11 +887,10 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
 
             if (process.ExitCode == 0 && !string.IsNullOrWhiteSpace(output))
             {
-                var parsed = ParseCliQuotaResponse(output, settings);
+                var parsed = ReadCliQuotaItems(output);
                 if (parsed.Count > 0)
                 {
-                    _lastCliFetchTime = DateTimeOffset.UtcNow;
-                    _lastCliCachedItems = parsed;
+                    _lastCliCache = new CachedQuotaRecord(DateTimeOffset.UtcNow, parsed);
                     return parsed;
                 }
             }
@@ -714,7 +908,7 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
             _cliLock.Release();
         }
 
-        return _lastCliCachedItems != null ? FilterCliItemsBySettings(_lastCliCachedItems, settings) : null;
+        return null;
     }
 
     private static IReadOnlyList<QuotaItem> FilterCliItemsBySettings(IReadOnlyList<QuotaItem> items, AppSettings settings)
@@ -722,208 +916,120 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         return items.Where(x => IsFamilyEnabled(x.Id, settings)).OrderBy(x => x.SortOrder).ToList();
     }
 
-    internal static IReadOnlyList<QuotaItem> ParseCliQuotaResponse(string json, AppSettings settings)
+    internal static IReadOnlyList<QuotaItem> ParseCliQuotaResponse(string json, AppSettings settings) =>
+        FilterCliItemsBySettings(ReadCliQuotaItems(json), settings);
+
+    private static List<QuotaItem> ReadCliQuotaItems(string json)
     {
         var items = new List<QuotaItem>();
-        if (string.IsNullOrWhiteSpace(json))
+        using JsonDocument? doc = TryParseDocument(json);
+        JsonElement root = doc?.RootElement ?? default;
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("command", out JsonElement command) || command.ValueKind != JsonValueKind.Object ||
+            !command.TryGetProperty("data", out JsonElement data))
         {
             return items;
         }
 
-        try
+        JsonElement groups = ReadSummaryGroups(data);
+        if (groups.ValueKind != JsonValueKind.Array)
         {
-            using var doc = JsonDocument.Parse(json);
-            JsonElement root = doc.RootElement;
+            return items;
+        }
 
-            if (!root.TryGetProperty("command", out JsonElement cmd) ||
-                !cmd.TryGetProperty("data", out JsonElement data) ||
-                !data.TryGetProperty("groups", out JsonElement groups) ||
-                groups.ValueKind != JsonValueKind.Array)
+        if (ParseCarbonBuckets(groups, CliSourceDetail) is { } carbon)
+        {
+            items.Add(carbon);
+        }
+
+        foreach (JsonElement group in groups.EnumerateArray())
+        {
+            if (group.ValueKind != JsonValueKind.Object || IsCarbonGroup(group) ||
+                !group.TryGetProperty("buckets", out JsonElement buckets) || buckets.ValueKind != JsonValueKind.Array)
             {
-                return items;
+                continue;
             }
 
-            foreach (JsonElement group in groups.EnumerateArray())
+            string groupName = ReadBucketName(group) ?? string.Empty;
+            foreach (JsonElement bucket in buckets.EnumerateArray())
             {
-                if (group.ValueKind != JsonValueKind.Object ||
-                    !group.TryGetProperty("name", out JsonElement nameEl))
+                if (bucket.ValueKind != JsonValueKind.Object || IsCarbonBucket(bucket))
                 {
                     continue;
                 }
 
-                string groupName = nameEl.GetString() ?? string.Empty;
-                if (!group.TryGetProperty("buckets", out JsonElement buckets) || buckets.ValueKind != JsonValueKind.Array)
+                string bucketId = ReadBucketId(bucket) ?? string.Empty;
+                string window = ReadStringProperty(bucket, "window") ?? string.Empty;
+                string? desc = ReadStringProperty(bucket, "description");
+                double remainingFraction = 0;
+                if (TryGetRemainingFraction(bucket, out JsonElement fraction) && fraction.ValueKind == JsonValueKind.Number &&
+                    fraction.TryGetDouble(out double parsed) && double.IsFinite(parsed))
                 {
-                    continue;
+                    remainingFraction = Math.Clamp(parsed, 0, 1);
                 }
 
-                foreach (JsonElement bucket in buckets.EnumerateArray())
+                double usedPercent = (1 - remainingFraction) * 100;
+                DateTimeOffset? resetTime = ReadResetTime(bucket);
+                void AddQuota(FamilyMetadata model, TimeSpan duration, string subtitle)
                 {
-                    if (bucket.ValueKind != JsonValueKind.Object)
+                    items.Add(new QuotaItem
                     {
-                        continue;
-                    }
+                        Id = model.Id,
+                        Provider = QuotaProviderType.Antigravity,
+                        ProviderBadge = model.Badge,
+                        BadgeColorHex = model.ColorHex,
+                        Title = model.DisplayName,
+                        UsedPercent = usedPercent,
+                        ResetTime = resetTime,
+                        WindowDuration = duration,
+                        Subtitle = subtitle,
+                        SourceDetail = CliSourceDetail,
+                        SortOrder = model.SortOrder
+                    });
+                }
 
-                    string bucketId = bucket.TryGetProperty("id", out JsonElement idEl) ? idEl.GetString() ?? "" : "";
-                    string window = bucket.TryGetProperty("window", out JsonElement winEl) ? winEl.GetString() ?? "" : "";
-                    string desc = bucket.TryGetProperty("description", out JsonElement descEl) ? descEl.GetString() ?? "" : "";
-
-                    double remainingFraction = 0.0;
-                    if (bucket.TryGetProperty("remaining_fraction", out JsonElement rfEl) && rfEl.TryGetDouble(out double rf))
+                if (groupName.Contains("Argon", StringComparison.OrdinalIgnoreCase) || bucketId.Contains("argon", StringComparison.OrdinalIgnoreCase))
+                {
+                    AddQuota(new FamilyMetadata("agy.gemini_argon", "Gemini 4 Argon", "ARGON", "#3B82F6", 30),
+                        TimeSpan.FromDays(7), string.IsNullOrWhiteSpace(desc) ? "Cota compartilhada (CLI)" : $"Cota compartilhada • {desc}");
+                }
+                else if (groupName.Contains("Gemini", StringComparison.OrdinalIgnoreCase))
+                {
+                    bool isSession = bucketId.Equals("gemini-5h", StringComparison.OrdinalIgnoreCase) || window.Equals("5h", StringComparison.OrdinalIgnoreCase);
+                    bool isWeekly = bucketId.Equals("gemini-weekly", StringComparison.OrdinalIgnoreCase) || window.Equals("weekly", StringComparison.OrdinalIgnoreCase);
+                    if (isSession)
                     {
-                        remainingFraction = Math.Clamp(rf, 0.0, 1.0);
+                        AddQuota(new FamilyMetadata("agy.gemini_flash", "Gemini 3.8 Flash (5h)", "GEMINI", "#06B6D4", 31),
+                            TimeSpan.FromHours(5), string.IsNullOrWhiteSpace(desc) ? "Cota de 5 horas Gemini 3.8 Flash (CLI)" : $"Cota Gemini 3.8 Flash • {desc}");
                     }
-                    double usedPercent = Math.Clamp((1.0 - remainingFraction) * 100.0, 0.0, 100.0);
-
-                    DateTimeOffset? resetTime = null;
-                    if (bucket.TryGetProperty("reset_time", out JsonElement rtEl) && rtEl.ValueKind == JsonValueKind.String &&
-                        DateTimeOffset.TryParse(rtEl.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset parsedRt))
+                    else if (isWeekly)
                     {
-                        resetTime = parsedRt;
+                        AddQuota(new FamilyMetadata("agy.gemini_weekly", "Gemini 3.8 Flash (7d)", "GEMINI", "#06B6D4", 32),
+                            TimeSpan.FromDays(7), string.IsNullOrWhiteSpace(desc) ? "Cota semanal Gemini 3.8 Flash (CLI)" : $"Cota semanal Gemini 3.8 Flash • {desc}");
                     }
-
-                    // 1. Argon
-                    if (groupName.Contains("Argon", StringComparison.OrdinalIgnoreCase) || bucketId.Contains("argon", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (settings.ShowAntigravityArgon)
-                        {
-                            items.Add(new QuotaItem
-                            {
-                                Id = "agy.gemini_argon",
-                                Provider = QuotaProviderType.Antigravity,
-                                ProviderBadge = "ARGON",
-                                BadgeColorHex = "#3B82F6",
-                                Title = "Gemini 4 Argon",
-                                UsedPercent = usedPercent,
-                                ResetTime = resetTime,
-                                WindowDuration = TimeSpan.FromDays(7),
-                                Subtitle = string.IsNullOrWhiteSpace(desc) ? "Cota compartilhada (CLI)" : $"Cota compartilhada • {desc}",
-                                SourceDetail = "Antigravity CLI (agy /quota)",
-                                IsAvailable = true,
-                                SortOrder = 30
-                            });
-                        }
-                    }
-                    // 2. Gemini Models (Flash)
-                    else if (groupName.Contains("Gemini", StringComparison.OrdinalIgnoreCase))
-                    {
-                        bool isWeekly = bucketId.Equals("gemini-weekly", StringComparison.OrdinalIgnoreCase) || window.Equals("weekly", StringComparison.OrdinalIgnoreCase);
-                        bool isSession = bucketId.Equals("gemini-5h", StringComparison.OrdinalIgnoreCase) || window.Equals("5h", StringComparison.OrdinalIgnoreCase);
-
-                        if (isSession && settings.ShowAntigravityFlash)
-                        {
-                            items.Add(new QuotaItem
-                            {
-                                Id = "agy.gemini_flash",
-                                Provider = QuotaProviderType.Antigravity,
-                                ProviderBadge = "GEMINI",
-                                BadgeColorHex = "#06B6D4",
-                                Title = "Gemini 3.8 Flash (5h)",
-                                UsedPercent = usedPercent,
-                                ResetTime = resetTime,
-                                WindowDuration = TimeSpan.FromHours(5),
-                                Subtitle = string.IsNullOrWhiteSpace(desc) ? "Cota de 5 horas Gemini 3.8 Flash (CLI)" : $"Cota Gemini 3.8 Flash • {desc}",
-                                SourceDetail = "Antigravity CLI (agy /quota)",
-                                IsAvailable = true,
-                                SortOrder = 31
-                            });
-                        }
-                        else if (isWeekly && settings.ShowAntigravityGeminiWeekly)
-                        {
-                            items.Add(new QuotaItem
-                            {
-                                Id = "agy.gemini_weekly",
-                                Provider = QuotaProviderType.Antigravity,
-                                ProviderBadge = "GEMINI",
-                                BadgeColorHex = "#06B6D4",
-                                Title = "Gemini 3.8 Flash (7d)",
-                                UsedPercent = usedPercent,
-                                ResetTime = resetTime,
-                                WindowDuration = TimeSpan.FromDays(7),
-                                Subtitle = string.IsNullOrWhiteSpace(desc) ? "Cota semanal Gemini 3.8 Flash (CLI)" : $"Cota semanal Gemini 3.8 Flash • {desc}",
-                                SourceDetail = "Antigravity CLI (agy /quota)",
-                                IsAvailable = true,
-                                SortOrder = 32
-                            });
-                        }
-                    }
-                    // 3. Claude and GPT models (3P)
-                    else if (groupName.Contains("Claude", StringComparison.OrdinalIgnoreCase))
-                    {
-                        bool isWeekly = bucketId.Contains("weekly", StringComparison.OrdinalIgnoreCase) || window.Equals("weekly", StringComparison.OrdinalIgnoreCase);
-                        if (isWeekly)
-                        {
-                            if (settings.ShowAntigravityClaudeOpus)
-                            {
-                                items.Add(new QuotaItem
-                                {
-                                    Id = "agy.claude_opus",
-                                    Provider = QuotaProviderType.Antigravity,
-                                    ProviderBadge = "AGY",
-                                    BadgeColorHex = "#A855F7",
-                                    Title = "Claude Opus 5.5 (AGY)",
-                                    UsedPercent = usedPercent,
-                                    ResetTime = resetTime,
-                                    WindowDuration = TimeSpan.FromDays(7),
-                                    Subtitle = string.IsNullOrWhiteSpace(desc) ? "Cota compartilhada 3P (CLI)" : $"Cota 3P • {desc}",
-                                    SourceDetail = "Antigravity CLI (agy /quota)",
-                                    IsAvailable = true,
-                                    SortOrder = 33
-                                });
-                            }
-                            if (settings.ShowAntigravityClaudeSonnet)
-                            {
-                                items.Add(new QuotaItem
-                                {
-                                    Id = "agy.claude_sonnet",
-                                    Provider = QuotaProviderType.Antigravity,
-                                    ProviderBadge = "AGY",
-                                    BadgeColorHex = "#8B5CF6",
-                                    Title = "Claude Sonnet 5.5 (AGY)",
-                                    UsedPercent = usedPercent,
-                                    ResetTime = resetTime,
-                                    WindowDuration = TimeSpan.FromDays(7),
-                                    Subtitle = string.IsNullOrWhiteSpace(desc) ? "Cota compartilhada 3P (CLI)" : $"Cota 3P • {desc}",
-                                    SourceDetail = "Antigravity CLI (agy /quota)",
-                                    IsAvailable = true,
-                                    SortOrder = 34
-                                });
-                            }
-                            if (settings.ShowAntigravityGptOss)
-                            {
-                                items.Add(new QuotaItem
-                                {
-                                    Id = "agy.gpt_oss",
-                                    Provider = QuotaProviderType.Antigravity,
-                                    ProviderBadge = "AGY",
-                                    BadgeColorHex = "#64748B",
-                                    Title = "GPT-OSS 120B (AGY)",
-                                    UsedPercent = usedPercent,
-                                    ResetTime = resetTime,
-                                    WindowDuration = TimeSpan.FromDays(7),
-                                    Subtitle = string.IsNullOrWhiteSpace(desc) ? "Cota compartilhada 3P (CLI)" : $"Cota 3P • {desc}",
-                                    SourceDetail = "Antigravity CLI (agy /quota)",
-                                    IsAvailable = true,
-                                    SortOrder = 35
-                                });
-                            }
-                        }
-                    }
+                }
+                else if (groupName.Contains("Claude", StringComparison.OrdinalIgnoreCase) &&
+                    (bucketId.Contains("weekly", StringComparison.OrdinalIgnoreCase) || window.Equals("weekly", StringComparison.OrdinalIgnoreCase)))
+                {
+                    string subtitle = string.IsNullOrWhiteSpace(desc) ? "Cota compartilhada 3P (CLI)" : $"Cota 3P • {desc}";
+                    TimeSpan weeklyDuration = TimeSpan.FromDays(7);
+                    AddQuota(new FamilyMetadata("agy.claude_opus", "Claude Opus 5.5 (AGY)", "AGY", "#A855F7", 33), weeklyDuration, subtitle);
+                    AddQuota(new FamilyMetadata("agy.claude_sonnet", "Claude Sonnet 5.5 (AGY)", "AGY", "#8B5CF6", 34), weeklyDuration, subtitle);
+                    AddQuota(new FamilyMetadata("agy.gpt_oss", "GPT-OSS 120B (AGY)", "AGY", "#64748B", 35), weeklyDuration, subtitle);
                 }
             }
         }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Failed to parse CLI quota JSON: {ex.Message}");
-        }
 
-        return items.OrderBy(x => x.SortOrder).ToList();
+        return items;
     }
 
     public sealed record CachedQuotaRecord(
         DateTimeOffset CachedAt,
         List<QuotaItem> Items
-    );
+    )
+    {
+        public DateTimeOffset? CarbonCachedAt { get; init; }
+    }
 
     private static CachedQuotaRecord? _inMemoryCache;
 
@@ -941,13 +1047,22 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         return Path.Combine(dir, "antigravity_last_known_quota.json");
     }
 
-    internal static void SaveLastKnownQuotas(IReadOnlyList<QuotaItem> items)
+    internal static void SaveLastKnownQuotas(IReadOnlyList<QuotaItem> items, bool preserveHiddenCarbon = false)
     {
         if (items == null || items.Count == 0) return;
         var validItems = items.Where(x => x.IsAvailable).ToList();
         if (validItems.Count == 0) return;
 
-        var record = new CachedQuotaRecord(DateTimeOffset.Now, validItems);
+        DateTimeOffset? carbonCachedAt = null;
+        if (preserveHiddenCarbon && !validItems.Any(item => item.Id == CarbonQuotaId) &&
+            ReadLastKnownQuotaRecord() is { } previous &&
+            previous.Items?.Find(item => item is { Id: CarbonQuotaId, IsAvailable: true }) is { } carbon)
+        {
+            validItems.Add(carbon);
+            carbonCachedAt = previous.CarbonCachedAt ?? previous.CachedAt;
+        }
+
+        var record = new CachedQuotaRecord(DateTimeOffset.Now, validItems) { CarbonCachedAt = carbonCachedAt };
         _inMemoryCache = record;
 
         try
@@ -962,10 +1077,9 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
         }
     }
 
-    internal static IReadOnlyList<QuotaItem>? GetLastKnownQuotas(AppSettings settings)
+    private static CachedQuotaRecord? ReadLastKnownQuotaRecord()
     {
-        CachedQuotaRecord? record = _inMemoryCache;
-        if (record == null)
+        if (_inMemoryCache == null)
         {
             try
             {
@@ -973,8 +1087,7 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                 if (File.Exists(cachePath))
                 {
                     string json = File.ReadAllText(cachePath);
-                    record = JsonSerializer.Deserialize<CachedQuotaRecord>(json);
-                    _inMemoryCache = record;
+                    _inMemoryCache = JsonSerializer.Deserialize<CachedQuotaRecord>(json);
                 }
             }
             catch (Exception ex)
@@ -983,28 +1096,32 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
             }
         }
 
+        return _inMemoryCache;
+    }
+
+    internal static IReadOnlyList<QuotaItem>? GetLastKnownQuotas(AppSettings settings)
+    {
+        CachedQuotaRecord? record = ReadLastKnownQuotaRecord();
         if (record == null || record.Items == null || record.Items.Count == 0)
         {
             return null;
         }
 
-        string timeStr = record.CachedAt.ToString("HH:mm");
         var result = new List<QuotaItem>();
 
         foreach (QuotaItem item in record.Items)
         {
-            if (!IsFamilyEnabled(item.Id, settings))
+            if (item == null || !item.IsAvailable || !IsFamilyEnabled(item.Id, settings))
             {
                 continue;
             }
 
+            DateTimeOffset cachedAt = item.Id == CarbonQuotaId ? record.CarbonCachedAt ?? record.CachedAt : record.CachedAt;
+            string timeStr = cachedAt.ToString("HH:mm");
+            string cachedSubtitle = $"Última cota conhecida ({timeStr})";
             string cleanSubtitle = item.Subtitle ?? string.Empty;
             int separatorIdx = cleanSubtitle.IndexOf("•", StringComparison.Ordinal);
             string baseDesc = separatorIdx >= 0 ? cleanSubtitle.Substring(0, separatorIdx).Trim() : cleanSubtitle;
-            if (string.IsNullOrWhiteSpace(baseDesc))
-            {
-                baseDesc = item.Title;
-            }
 
             result.Add(new QuotaItem
             {
@@ -1016,8 +1133,9 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                 UsedPercent = item.UsedPercent,
                 ResetTime = item.ResetTime,
                 WindowDuration = item.WindowDuration,
+                AllowWindowDurationInference = item.AllowWindowDurationInference,
                 IsAvailable = true,
-                Subtitle = $"{baseDesc} • Última cota conhecida ({timeStr})",
+                Subtitle = string.IsNullOrWhiteSpace(baseDesc) ? cachedSubtitle : $"{baseDesc} • {cachedSubtitle}",
                 SourceDetail = $"Última cota conhecida salva às {timeStr} • Antigravity fechado",
                 SortOrder = item.SortOrder
             });
@@ -1029,14 +1147,13 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
     internal static void ClearCache()
     {
         _inMemoryCache = null;
-        _lastCliCachedItems = null;
-        _lastCliFetchTime = null;
+        _lastCliCache = null;
     }
 
-    private static IReadOnlyList<QuotaItem> CreateOfflineFallback(string? detail = null, AppSettings? settings = null)
+    private static IReadOnlyList<QuotaItem> CreateOfflineFallback(AppSettings settings)
     {
         var items = new List<QuotaItem>();
-        if (settings == null || settings.ShowAntigravityArgon)
+        if (settings.ShowAntigravityArgon)
         {
             items.Add(new QuotaItem
             {
@@ -1048,11 +1165,11 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                 UsedPercent = 0,
                 IsAvailable = false,
                 Subtitle = "Antigravity fechado (language_server offline)",
-                SourceDetail = detail ?? "Inicie o Antigravity para ler as cotas locais",
+                SourceDetail = "Inicie o Antigravity para ler as cotas locais",
                 SortOrder = 30
             });
         }
-        if (settings?.ShowAntigravityFlash == true)
+        if (settings.ShowAntigravityFlash)
         {
             items.Add(new QuotaItem
             {
@@ -1064,11 +1181,11 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                 UsedPercent = 0,
                 IsAvailable = false,
                 Subtitle = "Antigravity fechado (language_server offline)",
-                SourceDetail = detail ?? "Inicie o Antigravity para ler as cotas locais",
+                SourceDetail = "Inicie o Antigravity para ler as cotas locais",
                 SortOrder = 31
             });
         }
-        if (settings?.ShowAntigravityGeminiWeekly == true)
+        if (settings.ShowAntigravityGeminiWeekly)
         {
             items.Add(new QuotaItem
             {
@@ -1080,11 +1197,11 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                 UsedPercent = 0,
                 IsAvailable = false,
                 Subtitle = "Antigravity fechado (language_server offline)",
-                SourceDetail = detail ?? "Inicie o Antigravity para ler as cotas locais",
+                SourceDetail = "Inicie o Antigravity para ler as cotas locais",
                 SortOrder = 32
             });
         }
-        return items.Count > 0 ? items : new[]
+        return items.Count > 0 || settings.ShowAntigravityCarbon ? items : new[]
         {
             new QuotaItem
             {
@@ -1096,7 +1213,7 @@ public sealed class AntigravityQuotaProvider : IQuotaProvider
                 UsedPercent = 0,
                 IsAvailable = false,
                 Subtitle = "Antigravity fechado (language_server offline)",
-                SourceDetail = detail ?? "Inicie o Antigravity para ler as cotas locais",
+                SourceDetail = "Inicie o Antigravity para ler as cotas locais",
                 SortOrder = 30
             }
         };

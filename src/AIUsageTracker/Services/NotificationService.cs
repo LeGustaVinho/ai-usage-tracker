@@ -10,8 +10,10 @@ public sealed class NotificationService
 {
     private readonly SettingsService _settingsService;
     private readonly Action<string, string, bool> _showNotificationAction;
-    private readonly Dictionary<string, double> _previousUsedPercents = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, QuotaBaseline> _previousQuotas = new(StringComparer.OrdinalIgnoreCase);
     private bool _isFirstBaseline = true;
+
+    private readonly record struct QuotaBaseline(double UsedPercent, TimeSpan? WindowDuration);
 
     public NotificationService(
         SettingsService settingsService,
@@ -25,31 +27,8 @@ public sealed class NotificationService
     {
         AppSettings settings = _settingsService.Current;
 
-        // Skip alerting on the very first baseline load
-        if (_isFirstBaseline)
-        {
-            _isFirstBaseline = false;
-            foreach (var item in items)
-            {
-                if (item.IsAvailable)
-                {
-                    _previousUsedPercents[item.Id] = item.UsedPercent;
-                }
-            }
-            return;
-        }
-
-        if (!settings.EnableResetNotifications)
-        {
-            foreach (var item in items)
-            {
-                if (item.IsAvailable)
-                {
-                    _previousUsedPercents[item.Id] = item.UsedPercent;
-                }
-            }
-            return;
-        }
+        bool notifyOnDecrease = !_isFirstBaseline && settings.EnableResetNotifications;
+        _isFirstBaseline = false;
 
         foreach (var item in items)
         {
@@ -58,10 +37,11 @@ public sealed class NotificationService
                 continue;
             }
 
-            if (_previousUsedPercents.TryGetValue(item.Id, out double prevUsed))
+            if (notifyOnDecrease && _previousQuotas.TryGetValue(item.Id, out QuotaBaseline previous) &&
+                previous.WindowDuration == item.WindowDuration)
             {
                 // When used percent drops, available quota increases
-                double increase = prevUsed - item.UsedPercent;
+                double increase = previous.UsedPercent - item.UsedPercent;
                 double minIncrease = Math.Max(1.0, settings.MinQuotaIncreaseToNotifyPercent);
 
                 if (increase >= minIncrease)
@@ -79,7 +59,7 @@ public sealed class NotificationService
                 }
             }
 
-            _previousUsedPercents[item.Id] = item.UsedPercent;
+            _previousQuotas[item.Id] = new QuotaBaseline(item.UsedPercent, item.WindowDuration);
         }
     }
 

@@ -68,17 +68,25 @@ public class QuotaTrackerTests
         string tempPath = Path.Combine(Path.GetTempPath(), $"ai_tracker_test_{Guid.NewGuid():N}.json");
         try
         {
+            File.WriteAllText(tempPath, """{"WidgetWidth":365}""");
             var service = new SettingsService(tempPath);
+            Assert.True(service.Current.ShowClaudeFable);
+            Assert.True(service.Current.ShowAntigravityCarbon);
+
             var modified = service.Current.Clone();
             modified.WidgetWidth = 410.0;
             modified.ShowRemainingInsteadOfUsed = true;
             modified.WarningThresholdPercent = 55.0;
+            modified.ShowClaudeFable = false;
+            modified.ShowAntigravityCarbon = false;
             service.Update(modified);
 
             var reloaded = new SettingsService(tempPath);
             Assert.Equal(410.0, reloaded.Current.WidgetWidth);
             Assert.True(reloaded.Current.ShowRemainingInsteadOfUsed);
             Assert.Equal(55.0, reloaded.Current.WarningThresholdPercent);
+            Assert.False(reloaded.Current.ShowClaudeFable);
+            Assert.False(reloaded.Current.ShowAntigravityCarbon);
         }
         finally
         {
@@ -228,6 +236,8 @@ public class QuotaTrackerTests
     [Theory]
     [InlineData("{\"five_hour\":{\"utilization\":42.5}}", true)]
     [InlineData("{\"seven_day\":{\"utilization\":0}}", true)]
+    [InlineData("""{"limits":[{"kind":"weekly_scoped","scope":{"model":{"id":null,"display_name":"Fable"}},"percent":0,"is_active":false}]}""", true)]
+    [InlineData("""{"limits":[{"kind":"weekly_scoped","scope":{"model":{"display_name":"Fable"}},"percent":null}]}""", false)]
     [InlineData("{\"error\":{\"message\":\"rate limited\"}}", false)]
     [InlineData("{\"five_hour\":{\"utilization\":null}}", false)]
     [InlineData("{\"five_hour\":{\"utilization\":101}}", false)]
@@ -252,7 +262,8 @@ public class QuotaTrackerTests
             """;
 
         var items = ClaudeCodeQuotaProvider.SynthesizeQuotas(
-            new AppSettings(), null, new ClaudeCodeQuotaProvider.SessionDetails(null, null, null), payload, false);
+            new AppSettings { ShowClaudeFable = false }, null,
+            new ClaudeCodeQuotaProvider.SessionDetails(null, null, null), payload, false);
 
         Assert.Equal(3, items.Count); // Two basic windows and the valid Sonnet window.
         Assert.Equal(32.5, Assert.Single(items, x => x.Id == "claude.session").UsedPercent);
@@ -266,7 +277,7 @@ public class QuotaTrackerTests
     [Fact]
     public void ClaudeCodeQuotaProvider_ShowsUnavailableDedicatedQuotasWhenRequested()
     {
-        var settings = new AppSettings { ShowClaudeDedicatedEvenIfEmpty = true };
+        var settings = new AppSettings { ShowClaudeDedicatedEvenIfEmpty = true, ShowClaudeFable = false };
         var items = ClaudeCodeQuotaProvider.SynthesizeQuotas(
             settings, null, new ClaudeCodeQuotaProvider.SessionDetails(null, null, null),
             "{\"five_hour\":{\"utilization\":55}}", false);

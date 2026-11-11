@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json;
 using AIUsageTracker.Models;
 using AIUsageTracker.Services.Providers;
 using Xunit;
@@ -18,6 +19,18 @@ public class AntigravityQuotaProviderTests
             }
           }
         }
+        """;
+    private const string FlashSummaryGroup = """
+        { "displayName": "Gemini Models", "buckets": [
+          { "bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.8 },
+          { "bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.6 }
+        ] }
+        """;
+    private const string CarbonSummaryGroup = """
+        { "displayName": "Gemini 4 Carbon", "buckets": [
+          { "bucketId": "gemini-carbon-wtu-weekly", "window": "weekly", "remainingFraction": 0.75,
+            "resetTime": "2026-11-17T09:00:00Z" }
+        ] }
         """;
 
     [Fact]
@@ -247,6 +260,291 @@ public class AntigravityQuotaProviderTests
         Assert.Equal("Antigravity CLI (agy /quota)", argon.SourceDetail);
         Assert.True(argon.IsAvailable);
     }
+
+    [Fact]
+    public void CarbonSummaryTakesPrecedenceAndKeepsSharedGeminiBucketsSeparate()
+    {
+        const string summary = """
+        {
+          "response": {
+            "groups": [{
+              "displayName": "Gemini Models",
+              "buckets": [
+                { "bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.8 },
+                { "bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.7 },
+                { "bucketId": "gemini-carbon-5h", "window": "5h", "remainingFraction": 0.1 },
+                { "bucketId": "gemini-carbon-wtu-weekly", "window": "weekly",
+                  "remaining": { "remainingFraction": 0.4, "resetTime": "2026-11-17T09:00:00Z" } }
+              ]
+            }]
+          }
+        }
+        """;
+        string status = CarbonStatusJson("""{ "label": "Gemini 4 Carbon", "quotaInfo": { "remainingFraction": 0.1 } }""");
+
+        var items = AntigravityQuotaProvider.ParseQuotaResponses(status, summary, new AppSettings());
+
+        var carbon = Assert.Single(items, item => item.Id == "agy.gemini_carbon");
+        Assert.Equal(60, carbon.UsedPercent, 4);
+        Assert.Equal(TimeSpan.FromDays(7), carbon.WindowDuration);
+        Assert.Equal(new DateTimeOffset(2026, 11, 17, 9, 0, 0, TimeSpan.Zero), carbon.ResetTime);
+        Assert.Equal(20, Assert.Single(items, item => item.Id == "agy.gemini_weekly").UsedPercent, 4);
+        Assert.Equal(30, Assert.Single(items, item => item.Id == "agy.gemini_session").UsedPercent, 4);
+    }
+
+    [Fact]
+    public void CarbonSummaryWorksWithFlashWeeklyDisabledAndIncompleteStatus()
+    {
+        const string summary = """
+        { "groups": [{
+          "displayName": "Gemini 4 Carbon",
+          "buckets": [{ "displayName": "Weekly Limit Remaining", "remainingFraction": 0 }]
+        }] }
+        """;
+        var settings = new AppSettings { ShowAntigravityGeminiWeekly = false };
+
+        var carbon = Assert.Single(AntigravityQuotaProvider.ParseQuotaResponses("{", summary, settings));
+
+        Assert.Equal("agy.gemini_carbon", carbon.Id);
+        Assert.True(carbon.IsAvailable);
+        Assert.Equal(100, carbon.UsedPercent);
+        Assert.Equal(TimeSpan.FromDays(7), carbon.WindowDuration);
+    }
+
+    [Theory]
+    [InlineData("""{ "remainingFraction": 0 }""")]
+    [InlineData("""{ "resetTime": "2026-11-17T09:00:00Z" }""")]
+    public void CarbonStatusAcceptsExplicitAndProtobufZeroWithoutInventingDuration(string quota)
+    {
+        string status = CarbonStatusJson($$"""{ "label": "Gemini 4 Carbon (High)", "quotaInfo": {{quota}} }""");
+        var settings = new AppSettings { GroupAntigravityEffortLevels = false };
+
+        var carbon = Assert.Single(AntigravityQuotaProvider.ParseQuotaResponses(status, null, settings));
+
+        Assert.Equal("agy.gemini_carbon", carbon.Id);
+        Assert.True(carbon.IsAvailable);
+        Assert.Equal(100, carbon.UsedPercent);
+        Assert.Null(carbon.WindowDuration);
+        Assert.False(carbon.AllowWindowDurationInference);
+    }
+
+    [Theory]
+    [InlineData("""{ "label": "Gemini 4 Carbon", "quotaInfo": {} }""")]
+    [InlineData("""{ "label": "Gemini 4 Carbon", "disabled": true, "quotaInfo": { "remainingFraction": 0 } }""")]
+    [InlineData("""{ "label": "Gemini 4 Carbon", "modelId": "gemini-4-carbon-disabled", "quotaInfo": { "resetTime": "2026-11-17T09:00:00Z" } }""")]
+    [InlineData("""{ "label": "Gemini 4 Carbon", "quotaInfo": { "remainingFraction": "0", "resetTime": "2026-11-17T09:00:00Z" } }""")]
+    [InlineData("""{ "label": "Gemini 4 Carbon", "quotaInfo": { "resetTime": "unknown" } }""")]
+    public void InvalidOrDisabledCarbonStatusShowsOnlyTheUnavailableIndicator(string config)
+    {
+        var settings = new AppSettings();
+        var items = AntigravityQuotaProvider.ParseQuotaResponses(CarbonStatusJson(config), null, settings);
+
+        var carbon = Assert.Single(AntigravityQuotaProvider.WithCarbonPlaceholder(items, settings));
+        Assert.Equal("agy.gemini_carbon", carbon.Id);
+        Assert.False(carbon.IsAvailable);
+        Assert.Equal("Sem cota disponível", carbon.UnavailableMessage);
+        Assert.Null(carbon.ResetTime);
+
+        settings.ShowAntigravityCarbon = false;
+        Assert.Empty(AntigravityQuotaProvider.WithCarbonPlaceholder(items, settings));
+    }
+
+    [Fact]
+    public void CarbonCliQuotaCoexistsWithArgonAndFlashAndHonorsVisibility()
+    {
+        const string json = """
+        { "command": { "data": { "groups": [
+          { "name": "Gemini Models", "buckets": [
+            { "id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.9 }
+          ] },
+          { "name": "Gemini 4 Argon", "buckets": [
+            { "id": "gemini-argon-wtu-weekly", "window": "weekly", "remaining_fraction": 0.8 }
+          ] },
+          { "name": "Gemini 4 Carbon", "buckets": [
+            { "name": "Weekly Limit Remaining", "window": "weekly", "remaining_fraction": 0,
+              "reset_time": "2026-11-17T09:00:00Z" },
+            { "name": "Unknown quota", "window": "weekly" }
+          ] }
+        ] } } }
+        """;
+        var settings = new AppSettings();
+
+        var items = AntigravityQuotaProvider.ParseCliQuotaResponse(json, settings);
+        Assert.Equal(3, items.Count);
+        var carbon = Assert.Single(items, item => item.Id == "agy.gemini_carbon");
+        Assert.True(carbon.IsAvailable);
+        Assert.Equal(100, carbon.UsedPercent);
+        Assert.Equal(TimeSpan.FromDays(7), carbon.WindowDuration);
+        Assert.Equal(new DateTimeOffset(2026, 11, 17, 9, 0, 0, TimeSpan.Zero), carbon.ResetTime);
+        Assert.Equal(20, Assert.Single(items, item => item.Id == "agy.gemini_argon").UsedPercent, 4);
+        Assert.Equal(10, Assert.Single(items, item => item.Id == "agy.gemini_weekly").UsedPercent, 4);
+
+        settings.ShowAntigravityCarbon = false;
+        Assert.Equal(2, AntigravityQuotaProvider.ParseCliQuotaResponse(json, settings).Count);
+        var fromStatus = AntigravityQuotaProvider.ParseQuotaResponses(CarbonStatusJson(
+            """{ "label": "Gemini 4 Carbon (High)", "quotaInfo": { "remainingFraction": 0.75 } }"""), null, settings);
+        Assert.Empty(fromStatus);
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    public async Task LiveFetchCanReplaceCachedFlashEndpointWithCarbon(bool showFlashWeekly, bool carbonEndpointHasFlash)
+    {
+        await WithIsolatedCacheAsync(async _ =>
+        {
+            var flashEndpoint = new AntigravityQuotaProvider.LanguageServerEndpoint(1, "http://127.0.0.1:10101", "test");
+            var carbonEndpoint = new AntigravityQuotaProvider.LanguageServerEndpoint(2, "http://127.0.0.1:10102", "test");
+            var attempts = new List<(AntigravityQuotaProvider.LanguageServerEndpoint, bool)>();
+            var provider = new AntigravityQuotaProvider(
+                () => [flashEndpoint, carbonEndpoint],
+                (endpoint, requestSummary, _) =>
+                {
+                    attempts.Add((endpoint, requestSummary));
+                    string? status = null;
+                    string summary = WrapSummary(FlashSummaryGroup);
+                    if (endpoint == carbonEndpoint)
+                    {
+                        if (carbonEndpointHasFlash)
+                        {
+                            summary = WrapSummary(FlashSummaryGroup, CarbonSummaryGroup);
+                        }
+                        else
+                        {
+                            status = CarbonStatusJson("""
+                                { "label": "Gemini 4 Carbon", "quotaInfo": { "remainingFraction": 0.75 } }
+                                """);
+                            summary = WrapSummary();
+                        }
+                    }
+                    return Task.FromResult<AntigravityQuotaProvider.QuotaResponses?>(
+                        new(status, requestSummary ? summary : null));
+                });
+
+            var settings = new AppSettings { ShowAntigravityCarbon = false, EnableAntigravityCliFallback = false };
+            Assert.Contains(await provider.FetchQuotasAsync(settings), item => item.Id == "agy.gemini_weekly" && item.IsAvailable);
+            Assert.Equal((flashEndpoint, true), Assert.Single(attempts));
+
+            attempts.Clear();
+            settings.ShowAntigravityCarbon = true;
+            settings.ShowAntigravityGeminiWeekly = showFlashWeekly;
+            var items = await provider.FetchQuotasAsync(settings);
+
+            Assert.Equal(new[] { (flashEndpoint, true), (carbonEndpoint, true) }, attempts);
+            Assert.Equal(25, Assert.Single(items, item => item.Id == "agy.gemini_carbon").UsedPercent);
+            Assert.Equal(showFlashWeekly && carbonEndpointHasFlash, items.Any(item => item.Id == "agy.gemini_weekly" && item.IsAvailable));
+
+            attempts.Clear();
+            await provider.FetchQuotasAsync(settings);
+            Assert.Equal((carbonEndpoint, true), attempts[0]);
+        });
+    }
+
+    [Fact]
+    public async Task LiveRefreshWhileCarbonIsHiddenPreservesItsQuotaForOfflineUse()
+    {
+        await WithIsolatedCacheAsync(async path =>
+        {
+            var endpoint = new AntigravityQuotaProvider.LanguageServerEndpoint(1, "http://127.0.0.1:10101", "test");
+            bool online = true;
+            var provider = new AntigravityQuotaProvider(
+                () => [endpoint],
+                (_, requestSummary, _) => Task.FromResult<AntigravityQuotaProvider.QuotaResponses?>(
+                    online && requestSummary ? new(null, WrapSummary(FlashSummaryGroup, CarbonSummaryGroup)) : null));
+            var settings = new AppSettings { EnableAntigravityCliFallback = false };
+            var initial = Assert.Single(await provider.FetchQuotasAsync(settings), item => item.Id == "agy.gemini_carbon");
+            Assert.True(initial.IsAvailable);
+            var initialCache = JsonSerializer.Deserialize<AntigravityQuotaProvider.CachedQuotaRecord>(File.ReadAllText(path))!;
+
+            AntigravityQuotaProvider.ClearCache();
+            settings.ShowAntigravityCarbon = false;
+            var hidden = await provider.FetchQuotasAsync(settings);
+            Assert.DoesNotContain(hidden, item => item.Id == initial.Id);
+            Assert.Contains(hidden, item => item.Id == "agy.gemini_weekly" && item.IsAvailable);
+            var refreshedCache = JsonSerializer.Deserialize<AntigravityQuotaProvider.CachedQuotaRecord>(File.ReadAllText(path))!;
+            Assert.Equal(initialCache.CachedAt, refreshedCache.CarbonCachedAt);
+
+            AntigravityQuotaProvider.ClearCache();
+            online = false;
+            settings.ShowAntigravityCarbon = true;
+            var cached = Assert.Single(await provider.FetchQuotasAsync(settings), item => item.Id == initial.Id);
+            Assert.True(cached.IsAvailable);
+            Assert.Equal(initial.UsedPercent, cached.UsedPercent);
+            Assert.Equal(initial.ResetTime, cached.ResetTime);
+            Assert.Contains($"Última cota conhecida ({initialCache.CachedAt:HH:mm})", cached.Subtitle);
+        });
+    }
+
+    private static string WrapSummary(params string[] groups) =>
+        $$"""{ "groups": [{{string.Join(",", groups)}}] }""";
+
+    private static async Task WithIsolatedCacheAsync(Func<string, Task> verify)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"agy_quota_test_{Guid.NewGuid():N}.json");
+        AntigravityQuotaProvider.CustomCacheFilePath = path;
+        AntigravityQuotaProvider.ClearCache();
+        try
+        {
+            await verify(path);
+        }
+        finally
+        {
+            AntigravityQuotaProvider.CustomCacheFilePath = string.Empty;
+            AntigravityQuotaProvider.ClearCache();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void CarbonCacheRestoresKnownQuotaAndDiscardsLegacyRows()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"agy_carbon_test_{Guid.NewGuid():N}.json");
+        AntigravityQuotaProvider.CustomCacheFilePath = path;
+        AntigravityQuotaProvider.ClearCache();
+
+        try
+        {
+            var settings = new AppSettings();
+            string status = CarbonStatusJson("""
+                { "label": "Gemini 4 Carbon", "quotaInfo": { "remainingFraction": 0.75, "resetTime": "2026-11-17T09:00:00Z" } }
+                """);
+            var carbon = Assert.Single(AntigravityQuotaProvider.ParseQuotaResponses(status, null, settings));
+            var legacy = new[] { "agy.gemini_4_carbon", "agy.gemini_4_carbon.0" }
+                .Select(id => new QuotaItem
+                {
+                    Id = id,
+                    Provider = QuotaProviderType.Antigravity,
+                    ProviderBadge = "AGY",
+                    BadgeColorHex = "#3B82F6",
+                    Title = "Gemini 4 Carbon",
+                    UsedPercent = 100
+                });
+
+            AntigravityQuotaProvider.SaveLastKnownQuotas(legacy.Append(carbon).ToList());
+            AntigravityQuotaProvider.ClearCache();
+
+            var cached = Assert.Single(AntigravityQuotaProvider.GetLastKnownQuotas(settings)!);
+            Assert.Equal(carbon.Id, cached.Id);
+            Assert.Equal(carbon.UsedPercent, cached.UsedPercent);
+            Assert.Equal(carbon.ResetTime, cached.ResetTime);
+            Assert.False(cached.AllowWindowDurationInference);
+            Assert.Contains("Última cota conhecida", cached.Subtitle);
+
+            settings.ShowAntigravityCarbon = false;
+            Assert.Null(AntigravityQuotaProvider.GetLastKnownQuotas(settings));
+        }
+        finally
+        {
+            AntigravityQuotaProvider.CustomCacheFilePath = string.Empty;
+            AntigravityQuotaProvider.ClearCache();
+            File.Delete(path);
+        }
+    }
+
+    private static string CarbonStatusJson(string config) => $$"""
+        { "userStatus": { "cascadeModelConfigData": { "clientModelConfigs": [{{config}}] } } }
+        """;
 
     [Fact]
     public void AntigravityQuotaProvider_SavesAndRestoresLastKnownQuotasWhenOffline()

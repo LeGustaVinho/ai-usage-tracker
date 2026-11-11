@@ -61,9 +61,162 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <DataTemplate x:Key="QuotaDetailsTemplate">
+            <StackPanel>
+                <!-- Row 1: Badge + Title + Countdown + Percent -->
+                <Grid Margin="0,0,0,5">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Provider Pill Badge -->
+                    <Border Grid.Column="0"
+                            Margin="0,0,6,0"
+                            Padding="5,1.5"
+                            VerticalAlignment="Center"
+                            Background="{Binding BadgeBrush}"
+                            CornerRadius="4">
+                        <TextBlock FontSize="9"
+                                   FontWeight="Bold"
+                                   Foreground="White"
+                                   Text="{Binding ProviderBadge}" />
+                    </Border>
+
+                    <!-- Quota Title -->
+                    <TextBlock Grid.Column="1"
+                               VerticalAlignment="Center"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               Foreground="#F8FAFC"
+                               Text="{Binding Title}"
+                               TextTrimming="CharacterEllipsis" />
+
+                    <!-- Reset Countdown -->
+                    <TextBlock Grid.Column="2"
+                               Margin="6,0,6,0"
+                               VerticalAlignment="Center"
+                               FontSize="10.5"
+                               Foreground="#7DD3FC"
+                               Text="{Binding ResetCountdownText}"
+                               Visibility="{Binding HasResetCountdown, Converter={StaticResource BoolToVis}}" />
+
+                    <!-- Percentage Value -->
+                    <TextBlock Grid.Column="3"
+                               VerticalAlignment="Center"
+                               FontSize="11.5"
+                               FontWeight="Bold"
+                               Foreground="{Binding StatusAccentBrush}"
+                               Text="{Binding DisplayPercentText}" />
+                </Grid>
+
+                <!-- Row 2: Quota Progress Bar -->
+                <ProgressBar Style="{StaticResource QuotaProgressBarStyle}"
+                             Foreground="{Binding BarFillBrush}"
+                             Value="{Binding DisplayPercentValue, Mode=OneWay}"
+                             Visibility="{Binding ShowQuotaBar, Converter={StaticResource BoolToVis}}" />
+
+                <TextBlock FontSize="11"
+                           Foreground="{Binding StatusAccentBrush}"
+                           Text="{Binding UnavailableMessage}"
+                           Visibility="{Binding HasUnavailableMessage, Converter={StaticResource BoolToVis}}" />
+
+                <!-- Row 3: Time Until Reset Progress Bar -->
+                <ProgressBar Margin="0,3.5,0,0"
+                             Style="{StaticResource ResetProgressBarStyle}"
+                             Foreground="{Binding ResetBarFillBrush}"
+                             Value="{Binding ResetDisplayPercentValue, Mode=OneWay}"
+                             Visibility="{Binding HasResetProgress, Converter={StaticResource BoolToVis}}" />
+
+                <!-- Row 4: Optional Subtitle -->
+                <TextBlock Margin="0,4,0,0"
+                           FontSize="10"
+                           Foreground="#94A3B8"
+                           Text="{Binding Subtitle}"
+                           TextTrimming="CharacterEllipsis"
+                           Visibility="{Binding ShowSubtitle, Converter={StaticResource BoolToVis}}" />
+            </StackPanel>
+        </DataTemplate>
+
+        <Style x:Key="SessionExpanderStyle" TargetType="Expander">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Expander">
+                        <StackPanel>
+                            <ToggleButton x:Name="HeaderSite"
+                                          IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                          AutomationProperties.Name="{TemplateBinding Header}"
+                                          Foreground="#CBD5E1"
+                                          Cursor="Hand">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border x:Name="HeaderBorder" Background="#33101A2A"
+                                                BorderBrush="#2694A3B8" BorderThickness="1"
+                                                Padding="7,3" CornerRadius="5">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <Path x:Name="Chevron" Width="8" Height="8" Margin="0,0,6,0"
+                                                      VerticalAlignment="Center"
+                                                      Data="M 2,1 L 6,4 L 2,7"
+                                                      Stroke="{TemplateBinding Foreground}" StrokeThickness="1.2" />
+                                                <ContentPresenter Grid.Column="1" VerticalAlignment="Center"
+                                                                  TextElement.FontSize="10.5"
+                                                                  TextElement.Foreground="{TemplateBinding Foreground}" />
+                                                <StackPanel x:Name="SessionIndicators" Grid.Column="2"
+                                                            Width="64" Margin="8,0,0,0"
+                                                            VerticalAlignment="Center" IsHitTestVisible="False"
+                                                            Visibility="{Binding SessionPreview.IsAvailable, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}">
+                                                    <ProgressBar Style="{StaticResource QuotaProgressBarStyle}"
+                                                                 Height="2" BorderThickness="0"
+                                                                 Value="{Binding SessionPreview.DisplayPercentValue, Mode=OneWay, FallbackValue=0}"
+                                                                 Foreground="{Binding SessionPreview.BarFillBrush}"
+                                                                 AutomationProperties.Name="Uso da cota de 5h" />
+                                                    <ProgressBar Style="{StaticResource ResetProgressBarStyle}"
+                                                                 Height="2" Margin="0,2,0,0" BorderThickness="0"
+                                                                 Value="{Binding SessionPreview.ResetDisplayPercentValue, Mode=OneWay, FallbackValue=0}"
+                                                                 Foreground="{Binding SessionPreview.ResetBarFillBrush}"
+                                                                 Visibility="{Binding SessionPreview.HasResetProgress, Converter={StaticResource BoolToVis}, FallbackValue=Collapsed}"
+                                                                 AutomationProperties.Name="Tempo até renovar a cota de 5h" />
+                                                </StackPanel>
+                                            </Grid>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsChecked" Value="True">
+                                                <Setter TargetName="Chevron" Property="Data" Value="M 1,2 L 4,6 L 7,2" />
+                                                <Setter TargetName="SessionIndicators" Property="Visibility" Value="Collapsed" />
+                                            </Trigger>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="HeaderBorder" Property="Background" Value="#55475569" />
+                                            </Trigger>
+                                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                                <Setter TargetName="HeaderBorder" Property="BorderBrush" Value="#7DD3FC" />
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                                <ContentPresenter ContentSource="Header" />
+                            </ToggleButton>
+
+                            <ContentPresenter x:Name="SessionContent" ContentSource="Content" Visibility="Collapsed" />
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsExpanded" Value="True">
+                                <Setter TargetName="SessionContent" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </UserControl.Resources>
 
-    <ItemsControl ItemsSource="{Binding QuotaBars}">
+    <ItemsControl ItemsSource="{Binding QuotaCards}">
         <ItemsControl.ItemTemplate>
             <DataTemplate>
                 <Border Margin="0,0,0,7"
@@ -71,77 +224,34 @@
                         Background="#661E293B"
                         BorderBrush="#2694A3B8"
                         BorderThickness="1"
-                        CornerRadius="8"
-                        ToolTip="{Binding ToolTipText}">
+                        CornerRadius="8">
                     <StackPanel>
-                        <!-- Row 1: Badge + Title + Countdown + Percent -->
-                        <Grid Margin="0,0,0,5">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
+                        <ContentPresenter Content="{Binding Quota}"
+                                          ContentTemplate="{StaticResource QuotaDetailsTemplate}"
+                                          ToolTip="{Binding Quota.ToolTipText}" />
 
-                            <!-- Provider Pill Badge -->
-                            <Border Grid.Column="0"
-                                    Margin="0,0,6,0"
-                                    Padding="5,1.5"
-                                    VerticalAlignment="Center"
-                                    Background="{Binding BadgeBrush}"
-                                    CornerRadius="4">
-                                <TextBlock FontSize="9"
-                                           FontWeight="Bold"
-                                           Foreground="White"
-                                           Text="{Binding ProviderBadge}" />
-                            </Border>
-
-                            <!-- Quota Title -->
-                            <TextBlock Grid.Column="1"
-                                       VerticalAlignment="Center"
-                                       FontSize="12"
-                                       FontWeight="SemiBold"
-                                       Foreground="#F8FAFC"
-                                       Text="{Binding Title}"
-                                       TextTrimming="CharacterEllipsis" />
-
-                            <!-- Reset Countdown -->
-                            <TextBlock Grid.Column="2"
-                                       Margin="6,0,6,0"
-                                       VerticalAlignment="Center"
-                                       FontSize="10.5"
-                                       Foreground="#7DD3FC"
-                                       Text="{Binding ResetCountdownText}"
-                                       Visibility="{Binding HasResetCountdown, Converter={StaticResource BoolToVis}}" />
-
-                            <!-- Percentage Value -->
-                            <TextBlock Grid.Column="3"
-                                       VerticalAlignment="Center"
-                                       FontSize="11.5"
-                                       FontWeight="Bold"
-                                       Foreground="{Binding StatusAccentBrush}"
-                                       Text="{Binding DisplayPercentText}" />
-                        </Grid>
-
-                        <!-- Row 2: Quota Progress Bar -->
-                        <ProgressBar Style="{StaticResource QuotaProgressBarStyle}"
-                                     Foreground="{Binding BarFillBrush}"
-                                     Value="{Binding DisplayPercentValue, Mode=OneWay}" />
-
-                        <!-- Row 3: Time Until Reset Progress Bar -->
-                        <ProgressBar Margin="0,3.5,0,0"
-                                     Style="{StaticResource ResetProgressBarStyle}"
-                                     Foreground="{Binding ResetBarFillBrush}"
-                                     Value="{Binding ResetDisplayPercentValue, Mode=OneWay}"
-                                     Visibility="{Binding HasResetCountdown, Converter={StaticResource BoolToVis}}" />
-
-                        <!-- Row 4: Optional Subtitle -->
-                        <TextBlock Margin="0,4,0,0"
-                                   FontSize="10"
-                                   Foreground="#94A3B8"
-                                   Text="{Binding Subtitle}"
-                                   TextTrimming="CharacterEllipsis"
-                                   Visibility="{Binding ShowSubtitle, Converter={StaticResource BoolToVis}}" />
+                        <Expander Margin="0,6,0,0"
+                                  Header="Cota de 5h"
+                                  Style="{StaticResource SessionExpanderStyle}"
+                                  IsExpanded="{Binding IsSessionExpanded, Mode=TwoWay}"
+                                  Visibility="{Binding HasSessionQuotas, Converter={StaticResource BoolToVis}}">
+                            <ItemsControl ItemsSource="{Binding SessionQuotas}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Margin="12,5,0,0"
+                                                Padding="7,6"
+                                                Background="#66101A2A"
+                                                BorderBrush="#2694A3B8"
+                                                BorderThickness="1"
+                                                CornerRadius="6"
+                                                ToolTip="{Binding ToolTipText}">
+                                            <ContentPresenter Content="{Binding}"
+                                                              ContentTemplate="{StaticResource QuotaDetailsTemplate}" />
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </Expander>
                     </StackPanel>
                 </Border>
             </DataTemplate>

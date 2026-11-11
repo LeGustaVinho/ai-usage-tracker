@@ -368,7 +368,7 @@
                                            FontSize="13.5"
                                            FontWeight="Bold"
                                            Foreground="#F97316"
-                                           Text="Claude Code CLI — Opus / Sonnet (~/.claude)" />
+                                           Text="Claude Code CLI (~/.claude)" />
                                 <CheckBox FontWeight="SemiBold"
                                           Content="Habilitar monitoramento do Claude Code"
                                           IsChecked="{Binding Draft.EnableClaudeCode}" />
@@ -384,6 +384,9 @@
                                 <CheckBox Margin="18,4,0,4"
                                           Content="Mostrar Cota Semanal Dedicada Claude Sonnet"
                                           IsChecked="{Binding Draft.ShowClaudeSonnet}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar cota semanal do Claude Fable"
+                                          IsChecked="{Binding Draft.ShowClaudeFable}" />
                                 <CheckBox Margin="18,4,0,4"
                                           Content="Forçar exibição das barras Opus/Sonnet mesmo quando unificadas na conta"
                                           IsChecked="{Binding Draft.ShowClaudeDedicatedEvenIfEmpty}" />
@@ -447,6 +450,9 @@
                                 <CheckBox Margin="18,4,0,4"
                                           Content="Mostrar Gemini 4 Argon"
                                           IsChecked="{Binding Draft.ShowAntigravityArgon}" />
+                                <CheckBox Margin="18,4,0,4"
+                                          Content="Mostrar Gemini 4 Carbon"
+                                          IsChecked="{Binding Draft.ShowAntigravityCarbon}" />
                                 <CheckBox Margin="18,4,0,4"
                                           Content="Mostrar Gemini 3.8 Flash (5h)"
                                           IsChecked="{Binding Draft.ShowAntigravityFlash}" />

@@ -28,8 +28,10 @@ public sealed class QuotaItem
     public double RemainingPercent => Math.Clamp(100.0 - UsedPercent, 0.0, 100.0);
     public DateTimeOffset? ResetTime { get; init; }
     public TimeSpan? WindowDuration { get; init; }
+    public bool AllowWindowDurationInference { get; init; } = true;
     public string? Subtitle { get; init; }
     public string? SourceDetail { get; init; }
     public bool IsAvailable { get; init; } = true;
+    public string? UnavailableMessage { get; init; }
     public int SortOrder { get; init; }
 }

@@ -39,12 +39,13 @@ public sealed class AppSettings
     public bool ShowCodexSecondary { get; set; } = true;
     public string CustomCodexAuthPath { get; set; } = string.Empty;
 
-    // Claude Code CLI (Opus / Sonnet / Sessão / Semanal)
+    // Claude Code CLI
     public bool EnableClaudeCode { get; set; } = true;
     public bool ShowClaudeSession5h { get; set; } = true;
     public bool ShowClaudeWeekly7d { get; set; } = true;
     public bool ShowClaudeOpus { get; set; } = true;
     public bool ShowClaudeSonnet { get; set; } = true;
+    public bool ShowClaudeFable { get; set; } = true;
     public bool ShowClaudeDedicatedEvenIfEmpty { get; set; } = false;
     public bool ShowClaudeSessionCostSubtitle { get; set; } = true;
     public bool AutoPromptClaudeLoginOnExpiration { get; set; } = true;
@@ -54,6 +55,7 @@ public sealed class AppSettings
     public bool EnableAntigravity { get; set; } = true;
     public bool GroupAntigravityEffortLevels { get; set; } = true;
     public bool ShowAntigravityArgon { get; set; } = true;
+    public bool ShowAntigravityCarbon { get; set; } = true;
     public bool ShowAntigravityFlash { get; set; } = true;
     public bool ShowAntigravityGeminiWeekly { get; set; } = true;
     public bool ShowAntigravityClaudeOpus { get; set; } = true;

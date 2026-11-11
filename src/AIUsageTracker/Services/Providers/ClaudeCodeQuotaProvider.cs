@@ -158,7 +158,8 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         TimeSpan age = DateTimeOffset.UtcNow - _lastValidApiTimeUtc;
         string? recentCachedApi = age >= TimeSpan.Zero && age <= MaxCachedApiAge
             ? _lastValidApiJson : null;
-        var items = SynthesizeQuotas(settings, planHistory, sessionDetails, apiBody ?? recentCachedApi, isTokenExpired);
+        var items = SynthesizeQuotas(settings, planHistory, sessionDetails, apiBody ?? recentCachedApi, isTokenExpired,
+            usingCachedApi: apiBody == null && recentCachedApi != null);
         if (items.Count > 0)
         {
             return items;
@@ -267,6 +268,8 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
             {
                 if (TryReadUsageWindow(doc.RootElement, key, out _, out _)) return true;
             }
+
+            return TryReadFableWindow(doc.RootElement, out _, out _);
         }
         catch (JsonException) { }
 
@@ -275,11 +278,70 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
 
     private static bool TryReadUsageWindow(JsonElement root, string key, out double usedPercent, out DateTimeOffset? reset)
     {
+        JsonElement window = root.ValueKind == JsonValueKind.Object && root.TryGetProperty(key, out JsonElement value)
+            ? value : default;
+        return TryReadWindowValues(window, "utilization", out usedPercent, out reset);
+    }
+
+    private static bool TryReadFableWindow(JsonElement root, out double usedPercent, out DateTimeOffset? reset)
+    {
         usedPercent = 0;
         reset = null;
         if (root.ValueKind != JsonValueKind.Object ||
-            !root.TryGetProperty(key, out JsonElement window) || window.ValueKind != JsonValueKind.Object ||
-            !window.TryGetProperty("utilization", out JsonElement utilization) || utilization.ValueKind != JsonValueKind.Number ||
+            !root.TryGetProperty("limits", out JsonElement limits) || limits.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (JsonElement limit in limits.EnumerateArray())
+        {
+            if (ReadStringProperty(limit, "kind") != "weekly_scoped" ||
+                !limit.TryGetProperty("scope", out JsonElement scope) || scope.ValueKind != JsonValueKind.Object ||
+                !scope.TryGetProperty("model", out JsonElement model) || !IsFableModel(model))
+            {
+                continue;
+            }
+
+            if (TryReadWindowValues(limit, "percent", out usedPercent, out reset))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsFableModel(JsonElement model)
+    {
+        string? id = ReadStringProperty(model, "id");
+        if (string.Equals(id, "fable", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(id, "claude-fable", StringComparison.OrdinalIgnoreCase) ||
+            id?.StartsWith("claude-fable-", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return true;
+        }
+
+        string? name = ReadStringProperty(model, "display_name")?.Trim();
+        if (name?.StartsWith("Claude ", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            name = name["Claude ".Length..];
+        }
+
+        return string.Equals(name, "Fable", StringComparison.OrdinalIgnoreCase) ||
+               name?.StartsWith("Fable ", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static string? ReadStringProperty(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object &&
+        element.TryGetProperty(name, out JsonElement property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString() : null;
+
+    private static bool TryReadWindowValues(JsonElement window, string percentKey, out double usedPercent, out DateTimeOffset? reset)
+    {
+        usedPercent = 0;
+        reset = null;
+        if (window.ValueKind != JsonValueKind.Object ||
+            !window.TryGetProperty(percentKey, out JsonElement utilization) || utilization.ValueKind != JsonValueKind.Number ||
             !utilization.TryGetDouble(out double value) || !double.IsFinite(value) || value < 0 || value > 100)
             return false;
 
@@ -334,7 +396,8 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
         PlanHistorySample? planHistory,
         SessionDetails sessionDetails,
         string? apiBody,
-        bool isTokenExpired)
+        bool isTokenExpired,
+        bool usingCachedApi = false)
     {
         var items = new List<QuotaItem>();
 
@@ -526,6 +589,27 @@ public sealed class ClaudeCodeQuotaProvider : IQuotaProvider
                 items.Add(CreateUnavailableDedicatedQuota("claude.opus", "Claude Opus (7d)", 22));
             if (settings.ShowClaudeSonnet && !items.Any(item => item.Id == "claude.sonnet"))
                 items.Add(CreateUnavailableDedicatedQuota("claude.sonnet", "Claude Sonnet (7d)", 23));
+        }
+
+        if (settings.ShowClaudeFable)
+        {
+            bool hasFable = TryReadFableWindow(apiRoot, out double fableUsed, out DateTimeOffset? fableReset);
+            items.Add(new QuotaItem
+            {
+                Id = "claude.fable",
+                Provider = QuotaProviderType.ClaudeCode,
+                ProviderBadge = "CLAUDE",
+                BadgeColorHex = "#D97757",
+                Title = "Claude Fable (7d)",
+                UsedPercent = fableUsed,
+                ResetTime = fableReset,
+                WindowDuration = TimeSpan.FromDays(7),
+                Subtitle = hasFable && usingCachedApi ? "Última cota conhecida" : null,
+                SourceDetail = hasFable && usingCachedApi ? "Cache OAuth da Anthropic" : "Anthropic OAuth API",
+                IsAvailable = hasFable,
+                UnavailableMessage = hasFable ? null : "Sem cota disponível",
+                SortOrder = 24
+            });
         }
 
         return items;

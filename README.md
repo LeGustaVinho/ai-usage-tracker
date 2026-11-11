@@ -25,7 +25,7 @@
 
 ## Overview
 
-Modern AI-assisted development tools like **OpenAI Codex / ChatGPT**, **Anthropic Claude Code**, and **Google Antigravity (Gemini & Argon)** employ rolling session windows (e.g. 5-hour limits) and weekly bucket quotas (7-day limits). Getting interrupted by an unexpected rate limit in the middle of a refactoring session or critical bug fix halts workflow and productivity.
+Modern AI-assisted development tools like **OpenAI Codex / ChatGPT**, **Anthropic Claude Code**, and **Google Antigravity** employ session windows (e.g. 5-hour limits) and weekly quotas (7-day limits). Getting interrupted by an unexpected rate limit in the middle of a refactoring session or critical bug fix halts workflow and productivity.
 
 **AI Usage Tracker** is a lightweight, high-performance **WPF (.NET 10)** desktop application for Windows that gives you unified, ambient visibility over all your AI quotas. It delivers a floating, customizable dark glass HUD on your screen and integrates cleanly into the Windows System Tray with native audio notifications on quota resets.
 
@@ -35,7 +35,7 @@ Modern AI-assisted development tools like **OpenAI Codex / ChatGPT**, **Anthropi
 
 ### 🎯 Multi-Provider Support Out of the Box
 - **OpenAI Codex / ChatGPT**:
-  - Live 7-day rolling window monitoring via `wham/usage` OAuth API.
+  - Live monitoring of 5-hour and 7-day windows when the `wham/usage` OAuth API reports them.
   - Automatically identifies current plan tier (`prolite`, `plus`, `pro`, etc.).
   - Precise reset countdown timers (`↻ 6d 14h`).
   - Fallback parsing of local session JSONL files if the network is unavailable.
@@ -43,15 +43,19 @@ Modern AI-assisted development tools like **OpenAI Codex / ChatGPT**, **Anthropi
   - Real-time 5-hour session utilization (`claude.session`).
   - 7-day rolling quota tracking (`claude.weekly`).
   - Dedicated Opus (`claude.opus`) and Sonnet (`claude.sonnet`) rate-limit windows.
+  - Dedicated **Claude Fable (7d)** quota (`claude.fable`) when the account reports a weekly Fable limit.
   - **Zero-Friction Token Healing**: Silent, automatic token refresh via Anthropic's OAuth endpoint; triggers non-blocking interactive login only when tokens are permanently revoked.
-- **Google Antigravity (Gemini & Argon)**:
+- **Google Antigravity**:
   - Weekly quota tracking for **Gemini 3.8 Flash** (`gemini-weekly`).
   - 5-hour rolling session tracking (`gemini-5h`).
   - Dedicated tracking for **Gemini 4 Argon** (`gemini-argon-wtu-weekly`).
+  - Dedicated **Gemini 4 Carbon** tracking (`agy.gemini_carbon`) from the local quota summary, model status, or CLI. The cycle progress bar appears when the provider reports the window duration.
   - **Three-Tier Fallback Architecture**:
-    1. *IDE LanguageServer RPC*: Ultra-fast (<10ms) local probe when Antigravity IDE is running.
+    1. *IDE LanguageServer RPC*: Reads quotas from the running Antigravity server.
     2. *CLI Fallback*: Seamlessly queries `agy -p "/quota" --output-format json` in the background if the IDE is closed.
-    3. *Last Known Quota Cache*: Never flashes "OFFLINE 0%". If offline, preserves actual progress bars and countdowns with an informative `• Última cota conhecida` subtitle.
+    3. *Last Known Quota Cache*: When offline, shows the last valid reading with the `Última cota conhecida` subtitle when data is available.
+
+Fable and Carbon have independent visibility settings. When an enabled indicator has no valid reading, its card shows **Sem cota disponível** without a usage percentage or reset countdown.
 
 ---
 
@@ -62,6 +66,7 @@ Modern AI-assisted development tools like **OpenAI Codex / ChatGPT**, **Anthropi
 - **Compact / Minimalist View**: Collapse headers and details down to clean, compact progress bars with a single click.
 - **Display Mode Toggle** switches between **% Used** (default) and **% Remaining**.
 - **Reset Progress** shows a countdown and a separate progress bar for quotas with a known reset time.
+- **Collapsible 5-hour cards**: When matching 5-hour and 7-day quotas are both present, the session card sits inside the weekly card. Click **Cota de 5h** to collapse or expand it. The collapsed header shows two small, unlabeled bars for usage and reset progress when data is available. The HUD and tray flyout share the expanded state during the current app session. A 5-hour quota appears on its own when its matching weekly card is absent.
 
 ---
 
@@ -168,7 +173,7 @@ The executable is written to `./dist/publish/AIUsageTracker.exe`.
 
 ## 🧪 Testing
 
-The repository contains an automated test suite verifying provider parsing, silent token refresh, quota bucket separation (e.g. Gemini vs. Argon), and fallback cache recovery:
+The automated tests cover provider parsing, token expiry, Antigravity quota source selection and cache recovery, reset notifications, and collapsible quota grouping.
 
 ```bash
 dotnet test
@@ -198,6 +203,8 @@ Configuration is automatically stored in:
 | `CriticalThresholdPercent` | `85.0` | Percentage used at which the progress bar turns red. |
 | `EnableResetNotifications` | `true` | Enables Windows tray notifications when quotas reset. |
 | `PlaySoundOnNotification` | `true` | Plays a system sound when a notification fires. |
+| `ShowClaudeFable` | `true` | Shows the Claude Fable weekly quota card. |
+| `ShowAntigravityCarbon` | `true` | Shows the Gemini 4 Carbon quota card. |
 | `EnableAntigravityCliFallback` | `true` | Runs `agy -p "/quota"` via CLI when Antigravity IDE is closed. |
 
 ---

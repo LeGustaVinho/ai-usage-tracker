@@ -21,18 +21,24 @@ public sealed class QuotaBarViewModel : ObservableObject
     private static readonly Brush OfflineTextBrush = CreateSolid("#94A3B8");
 
     public string Id { get; }
+    internal QuotaProviderType Provider { get; }
+    internal TimeSpan? WindowDuration { get; }
     public string ProviderBadge { get; }
     public Brush BadgeBrush { get; }
     public string Title { get; }
     public string? Subtitle { get; }
     public bool ShowSubtitle { get; }
     public bool IsAvailable { get; }
+    public string? UnavailableMessage { get; }
+    public bool HasUnavailableMessage => UnavailableMessage != null;
+    public bool ShowQuotaBar => !HasUnavailableMessage;
     public double UsedPercent { get; }
     public double RemainingPercent { get; }
     public double DisplayPercentValue { get; }
     public string DisplayPercentText { get; }
     public string ResetCountdownText { get; }
     public bool HasResetCountdown { get; }
+    public bool HasResetProgress { get; }
     public double ResetTimeRemainingPercent { get; }
     public double ResetTimeElapsedPercent { get; }
     public double ResetDisplayPercentValue { get; }
@@ -45,12 +51,16 @@ public sealed class QuotaBarViewModel : ObservableObject
     public QuotaBarViewModel(QuotaItem item, AppSettings settings)
     {
         Id = item.Id;
+        Provider = item.Provider;
+        WindowDuration = item.WindowDuration;
         ProviderBadge = item.ProviderBadge;
         BadgeBrush = CreateSolid(item.BadgeColorHex);
         Title = item.Title;
         Subtitle = item.Subtitle;
         ShowSubtitle = settings.ShowSubtitles && !settings.CompactMode && !string.IsNullOrWhiteSpace(item.Subtitle);
         IsAvailable = item.IsAvailable;
+        UnavailableMessage = !item.IsAvailable && !string.IsNullOrWhiteSpace(item.UnavailableMessage)
+            ? item.UnavailableMessage : null;
         UsedPercent = item.UsedPercent;
         RemainingPercent = item.RemainingPercent;
 
@@ -58,7 +68,7 @@ public sealed class QuotaBarViewModel : ObservableObject
         {
             StatusLevel = QuotaStatusLevel.Offline;
             DisplayPercentValue = 0;
-            DisplayPercentText = "OFFLINE";
+            DisplayPercentText = HasUnavailableMessage ? string.Empty : "OFFLINE";
             ResetCountdownText = string.Empty;
             HasResetCountdown = false;
             ResetTimeRemainingPercent = 0;
@@ -106,9 +116,11 @@ public sealed class QuotaBarViewModel : ObservableObject
 
             ResetCountdownText = countdown;
             HasResetCountdown = !string.IsNullOrWhiteSpace(countdown);
+            HasResetProgress = HasResetCountdown &&
+                (item.WindowDuration is { TotalSeconds: > 0 } || item.AllowWindowDurationInference);
             ResetBarFillBrush = ResetTimeBrush;
 
-            if (HasResetCountdown)
+            if (HasResetProgress)
             {
                 ResetTimeRemainingPercent = TimeFormatHelper.CalculateResetTimeRemainingPercent(item);
                 ResetTimeElapsedPercent = Math.Clamp(100.0 - ResetTimeRemainingPercent, 0.0, 100.0);
@@ -118,7 +130,7 @@ public sealed class QuotaBarViewModel : ObservableObject
             }
         }
 
-        ToolTipText = BuildToolTip(item, ResetTimeRemainingPercent);
+        ToolTipText = BuildToolTip(item, HasResetProgress ? ResetTimeRemainingPercent : null);
     }
 
     private static string FormatPercentNumber(double value)
@@ -132,7 +144,7 @@ public sealed class QuotaBarViewModel : ObservableObject
         return value.ToString("0.0", CultureInfo.InvariantCulture);
     }
 
-    private static string BuildToolTip(QuotaItem item, double resetTimeRemainingPercent)
+    private static string BuildToolTip(QuotaItem item, double? resetTimeRemainingPercent)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"{item.Title} [{item.ProviderBadge}]");
@@ -141,12 +153,17 @@ public sealed class QuotaBarViewModel : ObservableObject
             sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"Consumido: {item.UsedPercent:0.0}%  |  Restante: {item.RemainingPercent:0.0}%"));
             if (item.ResetTime.HasValue)
             {
-                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{TimeFormatHelper.FormatResetFullLocal(item.ResetTime)} • Ciclo restante: {resetTimeRemainingPercent:0.#}%"));
+                sb.Append(TimeFormatHelper.FormatResetFullLocal(item.ResetTime));
+                if (resetTimeRemainingPercent is double remainingPercent)
+                {
+                    sb.Append(string.Create(CultureInfo.InvariantCulture, $" • Ciclo restante: {remainingPercent:0.#}%"));
+                }
+                sb.AppendLine();
             }
         }
         else
         {
-            sb.AppendLine("Status: Indisponível / Offline");
+            sb.AppendLine(item.UnavailableMessage ?? "Status: Indisponível / Offline");
         }
 
         if (!string.IsNullOrWhiteSpace(item.Subtitle))

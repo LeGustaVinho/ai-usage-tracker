@@ -124,8 +124,8 @@ public sealed class QuotaPollingService : IDisposable
         return string.Join("|",
             s.EnableCodex, s.ShowCodexPrimary, s.ShowCodexSecondary, s.CustomCodexAuthPath,
             s.EnableClaudeCode, s.ShowClaudeSession5h, s.ShowClaudeWeekly7d, s.ShowClaudeOpus,
-            s.ShowClaudeSonnet, s.ShowClaudeDedicatedEvenIfEmpty, s.ShowClaudeSessionCostSubtitle, s.CustomClaudeCredentialsPath,
-            s.EnableAntigravity, s.GroupAntigravityEffortLevels, s.ShowAntigravityArgon,
+            s.ShowClaudeSonnet, s.ShowClaudeFable, s.ShowClaudeDedicatedEvenIfEmpty, s.ShowClaudeSessionCostSubtitle, s.CustomClaudeCredentialsPath,
+            s.EnableAntigravity, s.GroupAntigravityEffortLevels, s.ShowAntigravityArgon, s.ShowAntigravityCarbon,
             s.ShowAntigravityFlash, s.ShowAntigravityGeminiWeekly, s.ShowAntigravityClaudeOpus, s.ShowAntigravityClaudeSonnet, s.ShowAntigravityGptOss,
             s.EnableAntigravityCliFallback, s.CustomAgyCliPath);
     }

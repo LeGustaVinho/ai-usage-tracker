@@ -24,6 +24,13 @@ public partial class TrayFlyoutWindow : Window
         _openSettingsAction = openSettingsAction;
         _exitApplicationAction = exitApplicationAction;
         DataContext = _viewModel;
+        SizeChanged += (_, _) =>
+        {
+            if (IsVisible)
+            {
+                PositionNearTaskbarCorner();
+            }
+        };
     }
 
     protected override void OnSourceInitialized(EventArgs e)

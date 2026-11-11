@@ -17,13 +17,21 @@ public sealed class MainViewModel : ObservableObject
     private readonly QuotaPollingService _pollingService;
     private readonly Action _openSettingsAction;
     private readonly ClaudeAuthService? _claudeAuthService;
+    private readonly HashSet<string> _collapsedSessions = new(StringComparer.Ordinal);
 
     private bool _isRefreshing;
     private string _lastUpdatedText = "Carregando...";
     private QuotaStatusLevel _overallStatus = QuotaStatusLevel.Normal;
     private string _traySummaryToolTip = "AI Usage Tracker";
+    private IReadOnlyList<QuotaCardViewModel> _quotaCards = Array.Empty<QuotaCardViewModel>();
 
     public ObservableCollection<QuotaBarViewModel> QuotaBars { get; } = new();
+
+    public IReadOnlyList<QuotaCardViewModel> QuotaCards
+    {
+        get => _quotaCards;
+        private set => SetProperty(ref _quotaCards, value);
+    }
 
     public bool IsRefreshing
     {
@@ -161,6 +169,7 @@ public sealed class MainViewModel : ObservableObject
         {
             QuotaBars.Add(new QuotaBarViewModel(item, cfg));
         }
+        QuotaCards = QuotaCardViewModel.Group(QuotaBars, _collapsedSessions);
 
         if (_pollingService.LastUpdated.HasValue)
         {
