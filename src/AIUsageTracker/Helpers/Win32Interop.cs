@@ -7,10 +7,18 @@ namespace AIUsageTracker.Helpers;
 
 public static class Win32Interop
 {
+    internal const int WM_WINDOWPOSCHANGED = 0x0047;
+
     private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TOPMOST = 0x00000008;
     private const int WS_EX_TRANSPARENT = 0x00000020;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WS_EX_NOACTIVATE = 0x08000000;
+    private const int SW_SHOWNOACTIVATE = 4;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private static readonly IntPtr HWND_TOPMOST = new(-1);
 
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const int ProcessCommandLineInformation = 60;
@@ -45,6 +53,22 @@ public static class Win32Interop
 
     [DllImport("user32.dll", EntryPoint = "SetWindowLong", SetLastError = true)]
     private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr hWnd, int command);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr OpenProcess(uint processAccess, bool bInheritHandle, int processId);
@@ -131,6 +155,29 @@ public static class Win32Interop
             exStyle &= ~WS_EX_TRANSPARENT;
         }
         SetWindowLongPtr(hWnd, GWL_EXSTYLE, exStyle);
+    }
+
+    internal static bool IsTopmostWindowVisible(IntPtr hWnd)
+    {
+        return IsWindowVisible(hWnd) && !IsIconic(hWnd) && IsTopmost(hWnd);
+    }
+
+    internal static void RestoreTopmostWindow(IntPtr hWnd)
+    {
+        if (!IsWindowVisible(hWnd) || IsIconic(hWnd))
+        {
+            ShowWindow(hWnd, SW_SHOWNOACTIVATE);
+        }
+
+        if (!IsTopmost(hWnd))
+        {
+            SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+
+    private static bool IsTopmost(IntPtr hWnd)
+    {
+        return (GetWindowLongPtr(hWnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
     }
 
     public static string GetCurrentDesktopName()

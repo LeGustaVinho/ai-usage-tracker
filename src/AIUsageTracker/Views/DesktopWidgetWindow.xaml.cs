@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using AIUsageTracker.Helpers;
 using AIUsageTracker.Models;
 using AIUsageTracker.Services;
@@ -15,6 +16,7 @@ public partial class DesktopWidgetWindow : Window
     private readonly SettingsService _settingsService;
     private readonly MainViewModel _viewModel;
     private IntPtr _hwnd;
+    private DispatcherOperation? _restoreOperation;
     private bool _allowClose;
 
     public DesktopWidgetWindow(SettingsService settingsService, MainViewModel viewModel)
@@ -35,14 +37,54 @@ public partial class DesktopWidgetWindow : Window
         _hwnd = new WindowInteropHelper(this).Handle;
         Win32Interop.SetToolWindow(_hwnd);
         Win32Interop.SetClickThrough(_hwnd, _settingsService.Current.ClickThrough);
+        HwndSource.FromHwnd(_hwnd)?.AddHook(OnWindowMessage);
     }
 
-    private void OnSettingsChanged(object? sender, AppSettings settings)
+    private IntPtr OnWindowMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (message == Win32Interop.WM_WINDOWPOSCHANGED)
+        {
+            QueueTopmostRestore();
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private bool ShouldKeepOnTop => !_allowClose && _hwnd != IntPtr.Zero && IsVisible
+        && _settingsService.Current.ShowDesktopWidget && _settingsService.Current.AlwaysOnTop;
+
+    private void QueueTopmostRestore()
+    {
+        if (_restoreOperation != null || !ShouldKeepOnTop || Win32Interop.IsTopmostWindowVisible(_hwnd))
+        {
+            return;
+        }
+
+        // Let WPF finish processing the native position change before restoring the HWND.
+        _restoreOperation = Dispatcher.InvokeAsync(() =>
+        {
+            try
+            {
+                if (ShouldKeepOnTop)
+                {
+                    Win32Interop.RestoreTopmostWindow(_hwnd);
+                }
+            }
+            finally
+            {
+                _restoreOperation = null;
+            }
+        }, DispatcherPriority.Background);
+    }
+
+    private void OnSettingsChanged(object? sender, AppSettings _)
     {
         Dispatcher.InvokeAsync(() =>
         {
+            if (_allowClose) return;
+
+            AppSettings settings = _settingsService.Current;
             Width = Math.Clamp(settings.WidgetWidth, 260, 600);
-            Topmost = settings.AlwaysOnTop;
             if (_hwnd != IntPtr.Zero)
             {
                 Win32Interop.SetClickThrough(_hwnd, settings.ClickThrough);
@@ -61,6 +103,8 @@ public partial class DesktopWidgetWindow : Window
             {
                 Hide();
             }
+
+            QueueTopmostRestore();
         });
     }
 
@@ -108,6 +152,8 @@ public partial class DesktopWidgetWindow : Window
     {
         _allowClose = true;
         _settingsService.SettingsChanged -= OnSettingsChanged;
+        _restoreOperation?.Abort();
+        HwndSource.FromHwnd(_hwnd)?.RemoveHook(OnWindowMessage);
         Close();
     }
 
