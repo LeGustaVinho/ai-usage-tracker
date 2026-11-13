@@ -26,6 +26,10 @@ public class QuotaTrackerTests
 
         string expired = TimeFormatHelper.FormatResetCountdown(DateTimeOffset.UtcNow.AddMinutes(-5));
         Assert.Equal("↻ agora", expired);
+
+        var localReset = new DateTimeOffset(new DateTime(2026, 11, 17, 14, 30, 0, DateTimeKind.Local));
+        Assert.StartsWith("Reseta em terça-feira, 17/11/2026 14:30 (",
+            TimeFormatHelper.FormatResetFullLocal(localReset.ToUniversalTime()));
     }
 
     [Fact]

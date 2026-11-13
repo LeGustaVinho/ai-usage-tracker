@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 
 namespace AIUsageTracker.Helpers;
 
@@ -43,8 +44,9 @@ public static class TimeFormatHelper
         }
 
         DateTimeOffset local = resetTime.Value.ToLocalTime();
+        string schedule = local.ToString("dddd, dd/MM/yyyy HH:mm", CultureInfo.GetCultureInfo("pt-BR"));
         string countdown = FormatResetCountdown(resetTime);
-        return $"Reseta em {local:dd/MM/yyyy HH:mm} ({countdown.Replace("↻ ", "")})";
+        return $"Reseta em {schedule} ({countdown.Replace("↻ ", "")})";
     }
 
     public static string FormatWindowDuration(int? seconds)

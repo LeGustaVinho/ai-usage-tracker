@@ -237,9 +237,11 @@
                         BorderThickness="1"
                         CornerRadius="8">
                     <StackPanel>
-                        <ContentPresenter Content="{Binding Quota}"
-                                          ContentTemplate="{StaticResource QuotaDetailsTemplate}"
-                                          ToolTip="{Binding Quota.ToolTipText}" />
+                        <Border Background="Transparent"
+                                ToolTip="{Binding Quota.ToolTipText}">
+                            <ContentPresenter Content="{Binding Quota}"
+                                              ContentTemplate="{StaticResource QuotaDetailsTemplate}" />
+                        </Border>
 
                         <Expander Margin="0,6,0,0"
                                   Header="Cota de 5h"
