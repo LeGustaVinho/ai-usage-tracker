@@ -19,7 +19,7 @@ public class QuotaPresentationTests
             var bar = new QuotaBarViewModel(item, settings);
 
             Assert.True(bar.HasUnavailableMessage);
-            Assert.Equal("Sem cota disponível", bar.UnavailableMessage);
+            Assert.Equal(item.UnavailableMessage, bar.UnavailableMessage);
             Assert.False(bar.ShowQuotaBar);
             Assert.Empty(bar.DisplayPercentText);
             Assert.False(bar.HasResetCountdown);
@@ -38,7 +38,7 @@ public class QuotaPresentationTests
             "quotaInfo": { "remainingFraction": 0.6, "resetTime": "{{reset}}" }
         }] } } }
         """;
-        var settings = new AppSettings();
+        var settings = new AppSettings { ShowAntigravityArgon = false };
         var carbon = Assert.Single(AntigravityQuotaProvider.ParseQuotaResponses(status, null, settings));
 
         var bar = new QuotaBarViewModel(carbon, settings);
@@ -73,6 +73,38 @@ public class QuotaPresentationTests
             notifier.ProcessQuotasUpdate(unavailable);
 
             Assert.Empty(notifications);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void CachedBalanceDoesNotChangeTheLiveNotificationBaseline()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"quota_notification_test_{Guid.NewGuid():N}.json");
+        try
+        {
+            var service = new SettingsService(path);
+            var settings = service.Current.Clone();
+            settings.PlaySoundOnNotification = false;
+            service.Update(settings);
+            var notifications = new List<string>();
+            var notifier = new NotificationService(service, (title, _, _) => notifications.Add(title));
+            var live = AntigravityQuotaProvider.ParseQuotaResponses(null, """
+                { "groups": [{ "buckets": [
+                  { "bucketId": "gemini-weekly", "remainingFraction": 0.2 }
+                ] }] }
+                """, settings).Single(item => item.Id == "agy.gemini_weekly");
+
+            notifier.ProcessQuotasUpdate([live]);
+            notifier.ProcessQuotasUpdate([live with { IsCached = true, UsedPercent = 0 }]);
+            notifier.ProcessQuotasUpdate([live with { SourceDetail = "Antigravity CLI", UsedPercent = 80 }]);
+            Assert.Empty(notifications);
+
+            notifier.ProcessQuotasUpdate([live with { SourceDetail = "Antigravity CLI", UsedPercent = 0 }]);
+            Assert.Single(notifications);
         }
         finally
         {
@@ -125,7 +157,13 @@ public class QuotaPresentationTests
     {
         var claude = ClaudeCodeQuotaProvider.SynthesizeQuotas(settings, null,
             new ClaudeCodeQuotaProvider.SessionDetails(null, null, null), null, false);
-        var carbon = AntigravityQuotaProvider.WithCarbonPlaceholder(Array.Empty<QuotaItem>(), settings);
-        return [Assert.Single(claude, item => item.Id == "claude.fable"), Assert.Single(carbon)];
+        const string status = """
+            { "userStatus": { "cascadeModelConfigData": { "clientModelConfigs": [
+              { "label": "Gemini 4 Carbon", "disabled": true }
+            ] } } }
+            """;
+        var carbon = AntigravityQuotaProvider.ParseQuotaResponses(status, null, settings);
+        return [Assert.Single(claude, item => item.Id == "claude.fable"),
+            Assert.Single(carbon, item => item.Id == "agy.gemini_carbon.unavailable")];
     }
 }

@@ -47,6 +47,7 @@ public sealed class QuotaBarViewModel : ObservableObject
     public Brush BarFillBrush { get; }
     public Brush StatusAccentBrush { get; }
     public string ToolTipText { get; }
+    public bool HasAssociatedModels { get; }
 
     public QuotaBarViewModel(QuotaItem item, AppSettings settings)
     {
@@ -56,8 +57,11 @@ public sealed class QuotaBarViewModel : ObservableObject
         ProviderBadge = item.ProviderBadge;
         BadgeBrush = CreateSolid(item.BadgeColorHex);
         Title = item.Title;
-        Subtitle = item.Subtitle;
-        ShowSubtitle = settings.ShowSubtitles && !settings.CompactMode && !string.IsNullOrWhiteSpace(item.Subtitle);
+        HasAssociatedModels = item.AssociatedModels is { Length: > 0 };
+        Subtitle = HasAssociatedModels ? string.Join(" · ", item.AssociatedModels!) : item.Subtitle;
+        if (HasAssociatedModels && item.IsCached)
+            Subtitle += $" • {item.Subtitle}";
+        ShowSubtitle = settings.ShowSubtitles && !settings.CompactMode && !string.IsNullOrWhiteSpace(Subtitle);
         IsAvailable = item.IsAvailable;
         UnavailableMessage = !item.IsAvailable && !string.IsNullOrWhiteSpace(item.UnavailableMessage)
             ? item.UnavailableMessage : null;
@@ -170,6 +174,9 @@ public sealed class QuotaBarViewModel : ObservableObject
         {
             sb.AppendLine(item.Subtitle);
         }
+
+        if (item.AssociatedModels is { Length: > 0 })
+            sb.AppendLine($"Modelos: {string.Join(", ", item.AssociatedModels)}");
 
         if (!string.IsNullOrWhiteSpace(item.SourceDetail))
         {

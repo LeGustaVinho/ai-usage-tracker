@@ -48,13 +48,13 @@ public sealed class QuotaCardViewModel : ObservableObject
 
     private static QuotaBarViewModel? FindWeeklyParent(QuotaBarViewModel bar, IReadOnlyList<QuotaBarViewModel> bars)
     {
-        // Pair the shared windows by quota identity, including older cache entries with no duration.
+        // Pair only windows belonging to the same quota group.
         string? weeklyId = (bar.Provider, bar.Id) switch
         {
             (QuotaProviderType.ClaudeCode, "claude.session") => "claude.weekly",
-            (QuotaProviderType.Antigravity, "agy.gemini_session" or "agy.gemini_flash") => "agy.gemini_weekly",
-            (QuotaProviderType.Antigravity, var id) when id.StartsWith("agy.gemini_flash.", StringComparison.Ordinal)
-                => "agy.gemini_weekly",
+            (QuotaProviderType.Antigravity, "agy.gemini_session") => "agy.gemini_weekly",
+            (QuotaProviderType.Antigravity, "agy.gemini_argon.session") => "agy.gemini_argon",
+            (QuotaProviderType.Antigravity, "agy.gemini_carbon.session") => "agy.gemini_carbon",
             (QuotaProviderType.Codex, "codex.primary") when bar.WindowDuration == TimeSpan.FromHours(5)
                 => "codex.secondary",
             (QuotaProviderType.Codex, "codex.secondary") when bar.WindowDuration == TimeSpan.FromHours(5)
@@ -64,6 +64,7 @@ public sealed class QuotaCardViewModel : ObservableObject
 
         return weeklyId == null ? null : bars.FirstOrDefault(parent =>
             parent.Provider == bar.Provider && parent.Id == weeklyId &&
-            (bar.Provider != QuotaProviderType.Codex || parent.WindowDuration == TimeSpan.FromDays(7)));
+            (bar.Provider != QuotaProviderType.Codex || parent.WindowDuration == TimeSpan.FromDays(7)) &&
+            (bar.Provider != QuotaProviderType.Antigravity || parent.IsAvailable));
     }
 }

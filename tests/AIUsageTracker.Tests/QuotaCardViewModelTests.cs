@@ -15,21 +15,24 @@ public class QuotaCardViewModelTests
             Bar("claude.session", QuotaProviderType.ClaudeCode),
             Bar("claude.weekly", QuotaProviderType.ClaudeCode),
             Bar("claude.fable", QuotaProviderType.ClaudeCode, TimeSpan.FromDays(7)),
-            Bar("agy.gemini_flash.0", QuotaProviderType.Antigravity),
-            Bar("agy.gemini_flash.1", QuotaProviderType.Antigravity),
+            Bar("agy.gemini_session", QuotaProviderType.Antigravity),
+            Bar("agy.gemini_flash.reported", QuotaProviderType.Antigravity),
             Bar("agy.gemini_weekly", QuotaProviderType.Antigravity),
-            Bar("agy.gemini_carbon", QuotaProviderType.Antigravity, TimeSpan.FromHours(5))
+            Bar("agy.gemini_carbon", QuotaProviderType.Antigravity, TimeSpan.FromDays(7)),
+            Bar("agy.gemini_carbon.session", QuotaProviderType.Antigravity, TimeSpan.FromHours(5))
         };
 
         var cards = QuotaCardViewModel.Group(bars, new HashSet<string>());
 
-        Assert.Equal(new[] { "codex.primary", "claude.weekly", "claude.fable", "agy.gemini_weekly", "agy.gemini_carbon" },
+        Assert.Equal(new[] { "codex.primary", "claude.weekly", "claude.fable", "agy.gemini_flash.reported",
+                "agy.gemini_weekly", "agy.gemini_carbon" },
             cards.Select(card => card.Quota.Id));
         Assert.Same(bars[1], Assert.Single(cards[0].SessionQuotas));
         Assert.Same(bars[2], Assert.Single(cards[1].SessionQuotas));
         Assert.Empty(cards[2].SessionQuotas);
-        Assert.Equal(new[] { bars[5], bars[6] }, cards[3].SessionQuotas);
-        Assert.Empty(cards[4].SessionQuotas);
+        Assert.Empty(cards[3].SessionQuotas);
+        Assert.Same(bars[5], Assert.Single(cards[4].SessionQuotas));
+        Assert.Same(bars[9], Assert.Single(cards[5].SessionQuotas));
     }
 
     [Fact]
@@ -58,11 +61,10 @@ public class QuotaCardViewModelTests
     {
         const QuotaProviderType provider = QuotaProviderType.Antigravity;
         var weekly = Bar("agy.gemini_weekly", provider);
-        var low = Bar("agy.gemini_flash.0", provider, usedPercent: 15);
-        var high = Bar("agy.gemini_flash.1", provider, usedPercent: 80);
-        var unavailable = Bar("agy.gemini_flash.2", provider, usedPercent: 100, available: false);
+        var high = Bar("agy.gemini_session", provider, usedPercent: 80);
+        var unavailable = Bar("agy.gemini_session", provider, usedPercent: 100, available: false);
 
-        Assert.Same(high, Assert.Single(QuotaCardViewModel.Group([low, high, unavailable, weekly], new HashSet<string>()))
+        Assert.Same(high, Assert.Single(QuotaCardViewModel.Group([high, weekly], new HashSet<string>()))
             .SessionPreview);
         Assert.Null(Assert.Single(QuotaCardViewModel.Group([unavailable, weekly], new HashSet<string>())).SessionPreview);
     }

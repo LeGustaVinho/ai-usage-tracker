@@ -46,16 +46,12 @@ Modern AI-assisted development tools like **OpenAI Codex / ChatGPT**, **Anthropi
   - Dedicated **Claude Fable (7d)** quota (`claude.fable`) when the account reports a weekly Fable limit.
   - **Zero-Friction Token Healing**: Silent, automatic token refresh via Anthropic's OAuth endpoint; triggers non-blocking interactive login only when tokens are permanently revoked.
 - **Google Antigravity**:
-  - Weekly quota tracking for **Gemini 3.8 Flash** (`gemini-weekly`).
-  - 5-hour rolling session tracking (`gemini-5h`).
-  - Dedicated tracking for **Gemini 4 Argon** (`gemini-argon-wtu-weekly`).
-  - Dedicated **Gemini 4 Carbon** tracking (`agy.gemini_carbon`) from the local quota summary, model status, or CLI. The cycle progress bar appears when the provider reports the window duration.
-  - **Three-Tier Fallback Architecture**:
-    1. *IDE LanguageServer RPC*: Reads quotas from the running Antigravity server.
-    2. *CLI Fallback*: Seamlessly queries `agy -p "/quota" --output-format json` in the background if the IDE is closed.
-    3. *Last Known Quota Cache*: When offline, shows the last valid reading with the `Última cota conhecida` subtitle when data is available.
+  - **Gemini (7d)** and **Gemini (5h)** display the shared quota (`gemini-weekly` and `gemini-5h`). The subtitle and tooltip list models whose membership is known, including Gemini 3.8 Flash and Gemini 4 Hydrogen when available.
+  - **Gemini 4 Argon** and **Gemini 4 Carbon** appear under the shared quota or in dedicated cards according to the reported groups. On Google AI Pro, Argon has its own weekly quota. Each reported window has its own balance and reset.
+  - Reads the local LanguageServer quota summary first, then `agy -p "/usage" --output-format json` when CLI fallback is enabled. The CLI catalog is refreshed through `agy models` at most once every five minutes per executable.
+  - When group data is unavailable, the tracker uses the compatible cache if available, then shows the balance reported by the local model. The cycle progress bar requires a reported window.
 
-Fable and Carbon have independent visibility settings. When an enabled indicator has no valid reading, its card shows **Sem cota disponível** without a usage percentage or reset countdown.
+Fable, Argon, and Carbon have independent visibility settings. For Antigravity models, **Indisponível nesta conta** means the catalog indicated unavailability, while **Cota não reportada** means the tracker could not establish a balance.
 
 ---
 
@@ -204,8 +200,11 @@ Configuration is automatically stored in:
 | `EnableResetNotifications` | `true` | Enables Windows tray notifications when quotas reset. |
 | `PlaySoundOnNotification` | `true` | Plays a system sound when a notification fires. |
 | `ShowClaudeFable` | `true` | Shows the Claude Fable weekly quota card. |
-| `ShowAntigravityCarbon` | `true` | Shows the Gemini 4 Carbon quota card. |
-| `EnableAntigravityCliFallback` | `true` | Runs `agy -p "/quota"` via CLI when Antigravity IDE is closed. |
+| `ShowAntigravityArgon` | `true` | Shows Gemini 4 Argon in the shared model list or as a dedicated indicator. |
+| `ShowAntigravityCarbon` | `true` | Shows Gemini 4 Carbon in the shared model list or as a dedicated indicator. |
+| `ShowAntigravityFlash` | `true` | Shows the shared Gemini 5-hour quota. |
+| `ShowAntigravityGeminiWeekly` | `true` | Shows the shared Gemini weekly quota. |
+| `EnableAntigravityCliFallback` | `true` | Runs `agy -p "/usage"` when the local Gemini quota summary is unavailable. |
 
 ---
 

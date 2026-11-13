@@ -442,10 +442,10 @@
                                           Content="Habilitar monitoramento do Gemini / Antigravity"
                                           IsChecked="{Binding Draft.EnableAntigravity}" />
                                 <CheckBox Margin="18,4,0,4"
-                                          Content="Buscar cota via CLI (agy) caso o Antigravity esteja fechado"
+                                          Content="Buscar cotas via CLI (agy) quando o resumo local estiver indisponível"
                                           IsChecked="{Binding Draft.EnableAntigravityCliFallback}" />
                                 <CheckBox Margin="18,4,0,4"
-                                          Content="Agrupar níveis de esforço (Low / Medium / High) em uma barra por modelo"
+                                          Content="Agrupar níveis de esforço na leitura por modelo"
                                           IsChecked="{Binding Draft.GroupAntigravityEffortLevels}" />
                                 <CheckBox Margin="18,4,0,4"
                                           Content="Mostrar Gemini 4 Argon"
@@ -454,10 +454,10 @@
                                           Content="Mostrar Gemini 4 Carbon"
                                           IsChecked="{Binding Draft.ShowAntigravityCarbon}" />
                                 <CheckBox Margin="18,4,0,4"
-                                          Content="Mostrar Gemini 3.8 Flash (5h)"
+                                          Content="Mostrar cota compartilhada Gemini (5h)"
                                           IsChecked="{Binding Draft.ShowAntigravityFlash}" />
                                 <CheckBox Margin="18,4,0,4"
-                                          Content="Mostrar Gemini 3.8 Flash (7d)"
+                                          Content="Mostrar cota compartilhada Gemini (7d)"
                                           IsChecked="{Binding Draft.ShowAntigravityGeminiWeekly}" />
                                 <CheckBox Margin="18,4,0,4"
                                           Content="Mostrar Claude Opus 5.5 (Cota do Antigravity)"

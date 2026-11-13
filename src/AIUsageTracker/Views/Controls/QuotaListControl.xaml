@@ -135,8 +135,19 @@
                            FontSize="10"
                            Foreground="#94A3B8"
                            Text="{Binding Subtitle}"
-                           TextTrimming="CharacterEllipsis"
-                           Visibility="{Binding ShowSubtitle, Converter={StaticResource BoolToVis}}" />
+                           Visibility="{Binding ShowSubtitle, Converter={StaticResource BoolToVis}}">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding HasAssociatedModels}" Value="True">
+                                    <Setter Property="TextWrapping" Value="Wrap" />
+                                    <Setter Property="TextTrimming" Value="None" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
             </StackPanel>
         </DataTemplate>
 

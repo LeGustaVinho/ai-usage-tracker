@@ -17,7 +17,7 @@ public enum QuotaStatusLevel
     Offline
 }
 
-public sealed class QuotaItem
+public sealed record QuotaItem
 {
     public required string Id { get; init; }
     public required QuotaProviderType Provider { get; init; }
@@ -32,6 +32,8 @@ public sealed class QuotaItem
     public string? Subtitle { get; init; }
     public string? SourceDetail { get; init; }
     public bool IsAvailable { get; init; } = true;
+    public bool IsCached { get; init; }
+    public string[]? AssociatedModels { get; init; }
     public string? UnavailableMessage { get; init; }
     public int SortOrder { get; init; }
 }

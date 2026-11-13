@@ -32,7 +32,7 @@ public sealed class NotificationService
 
         foreach (var item in items)
         {
-            if (!item.IsAvailable)
+            if (!item.IsAvailable || item.IsCached)
             {
                 continue;
             }
