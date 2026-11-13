@@ -13,9 +13,10 @@
 
 <br/>
 
-<img src="assets/screenshots/hud-preview.png" alt="AI Usage Tracker HUD Preview" width="450" />
+<img src="assets/screenshots/hud-preview.png" alt="Desktop HUD with the Gemini 5-hour quota expanded below the weekly quota" width="330" />
+<img src="assets/screenshots/tray-preview.png" alt="Tray flyout with the Gemini 5-hour quota collapsed into usage and reset bars" width="334" />
 
-<p><em>Real-time Dark Glass HUD displaying live quotas, reset countdowns, and utilization across OpenAI Codex, Anthropic Claude Code, and Google Antigravity.</em></p>
+<p><em>Desktop HUD and tray flyout in v1.2.0, shown with sample quotas.</em></p>
 
 **[Download for Windows (x64)](https://github.com/LeGustaVinho/ai-usage-tracker/releases/latest)**
 
@@ -44,7 +45,7 @@ Modern AI-assisted development tools like **OpenAI Codex / ChatGPT**, **Anthropi
   - 7-day rolling quota tracking (`claude.weekly`).
   - Dedicated Opus (`claude.opus`) and Sonnet (`claude.sonnet`) rate-limit windows.
   - Dedicated **Claude Fable (7d)** quota (`claude.fable`) when the account reports a weekly Fable limit.
-  - **Zero-Friction Token Healing**: Silent, automatic token refresh via Anthropic's OAuth endpoint; triggers non-blocking interactive login only when tokens are permanently revoked.
+  - Refreshes OAuth tokens automatically and opens an interactive login when the session needs to be reconnected.
 - **Google Antigravity**:
   - **Gemini (7d)** and **Gemini (5h)** display the shared quota (`gemini-weekly` and `gemini-5h`). The subtitle and tooltip list models whose membership is known, including Gemini 3.8 Flash and Gemini 4 Hydrogen when available.
   - **Gemini 4 Argon** and **Gemini 4 Carbon** appear under the shared quota or in dedicated cards according to the reported groups. On Google AI Pro, Argon has its own weekly quota. Each reported window has its own balance and reset.
@@ -55,13 +56,12 @@ Fable, Argon, and Carbon have independent visibility settings. For Antigravity m
 
 ---
 
-### 🪟 Sleek Desktop HUD (Glassmorphism Dark Widget)
-- **Ambient & Non-Intrusive**: Styled with semi-transparent dark glass, rounded borders, and subtle glow accents.
-- **Always on Top & Draggable**: Snap it anywhere on your desktop; position and size are automatically remembered across restarts.
-- **Click-Through Mode**: Press the lock icon or enable click-through (`WS_EX_TRANSPARENT`) so mouse events pass right through to windows beneath.
-- **Compact / Minimalist View**: Collapse headers and details down to clean, compact progress bars with a single click.
+### 🪟 Desktop HUD
+- **Always on Top** keeps the HUD visible over other windows. Drag the widget to reposition it. The tracker remembers its position and width.
+- **Click-Through Mode** passes clicks to the windows beneath the HUD. Use the tray menu to turn it off.
+- **Compact Mode** hides card subtitles and shortens percentage labels. Full quota details remain available in the tooltip.
 - **Display Mode Toggle** switches between **% Used** (default) and **% Remaining**.
-- **Reset Progress** shows a countdown and a separate progress bar for quotas with a known reset time.
+- **Reset Progress** shows a countdown when the reset time is known. The cycle progress bar also needs a known window duration.
 - **Collapsible 5-hour cards**: When matching 5-hour and 7-day quotas are both present, the session card sits inside the weekly card. Click **Cota de 5h** to collapse or expand it. The collapsed header shows two small, unlabeled bars for usage and reset progress when data is available. The HUD and tray flyout share the expanded state during the current app session. A 5-hour quota appears on its own when its matching weekly card is absent.
 
 ---
@@ -72,16 +72,16 @@ Fable, Argon, and Carbon have independent visibility settings. For Antigravity m
 
 ---
 
-### 📌 Windows 11 System Tray & Flyout
+### 📌 System Tray & Flyout
 - **Dynamic Tray Icon**: Displays status tooltips and quick visual health indicators.
-- **Modern Flyout**: Click the tray icon to pop up a Windows 11-styled flyout menu without opening full windows.
-- **Comprehensive Context Menu**: Quick access to Refresh, Settings, HUD toggle, Click-Through toggle, and Exit.
+- **Tray Flyout** opens with a left-click on the tracker icon and shows the same quota cards as the HUD.
+- **Context Menu** opens with a right-click and includes Refresh, Settings, HUD visibility, Click-Through, and Exit.
 
 ---
 
 ### ⚙️ Rich Customization & Thresholds
-- **Customizable Color Limits**: Set your own warning (e.g. 20%) and critical (e.g. 5%) thresholds with smooth color transitions (Green → Yellow/Orange → Red).
-- **Indicator Reordering & Visibility**: Enable, disable, and rearrange quota cards to match your personal workflow.
+- **Customizable Color Limits** use percentage consumed. The default warning threshold is 60% used and the critical threshold is 85% used.
+- **Indicator Visibility** lets you choose which providers and quota cards to display.
 - **Adjustable Polling Interval & Opacity** lets you tune background polling (10 to 3,600 seconds) and widget transparency.
 
 ---
@@ -194,7 +194,7 @@ Configuration is automatically stored in:
 | `ClickThrough` | `false` | Passes mouse clicks through the HUD. |
 | `CompactMode` | `false` | Displays compact quota cards. |
 | `ShowRemainingInsteadOfUsed` | `false` | Shows quota remaining instead of quota used. |
-| `ShowResetCountdown` | `true` | Shows the reset countdown and progress bar when a reset time is available. |
+| `ShowResetCountdown` | `true` | Shows the reset countdown when the reset time is known, plus cycle progress when the window duration is known. |
 | `WarningThresholdPercent` | `60.0` | Percentage used at which the progress bar turns yellow. |
 | `CriticalThresholdPercent` | `85.0` | Percentage used at which the progress bar turns red. |
 | `EnableResetNotifications` | `true` | Enables Windows tray notifications when quotas reset. |
